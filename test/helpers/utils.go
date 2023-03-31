@@ -175,6 +175,13 @@ func GetMcName(t *testing.T, cs *framework.ClientSet, poolName string) string {
 	return mcp.Status.Configuration.Name
 }
 
+// HasLabel checks if the given node has the specified label.
+func HasLabel(node corev1.Node, label string) bool {
+	nodeLabels := node.GetLabels()
+	_, exists := nodeLabels[label]
+	return exists
+}
+
 // WaitForConfigAndPoolComplete is a helper function that gets a renderedConfig and waits for its pool to complete.
 // The return value is the final rendered config.
 func WaitForConfigAndPoolComplete(t *testing.T, cs *framework.ClientSet, pool, mcName string) string {
