@@ -32,7 +32,7 @@ func runStartCmd(_ *cobra.Command, _ []string) {
 
 	klog.V(2).Infof("Options parsed: %+v", startOpts)
 
-	// To help debugging, immediately log version
+	// To help debugging, immediately log version number
 	klog.Infof("Version: %+v (%s)", version.Raw, version.Hash)
 
 }
