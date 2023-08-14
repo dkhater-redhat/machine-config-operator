@@ -787,20 +787,6 @@ func (optr *Operator) updateMachineOSBuilderDeployment(mob *appsv1.Deployment, r
 	return nil
 }
 
-// Delete the Machine OS Builder Deployment
-func (optr *Operator) stopMachineOSBuilderDeployment(name string) error {
-	return optr.kubeClient.AppsV1().Deployments(ctrlcommon.MCONamespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
-}
-
-// Determines if the Machine OS Builder has the correct replica count.
-func (optr *Operator) hasCorrectReplicaCount(mob *appsv1.Deployment) bool {
-	apiMob, err := optr.deployLister.Deployments(ctrlcommon.MCONamespace).Get(mob.Name)
-	if err == nil && *apiMob.Spec.Replicas == 1 {
-		return true
-	}
-	return false
-}
-
 // Updates the Machine OS Builder Deployment, creating it if it does not exist.
 func (optr *Operator) startMachineOSBuilderDeployment(mob *appsv1.Deployment) error {
 	// start machine os builder deployment
@@ -829,23 +815,6 @@ func (optr *Operator) isMachineOSBuilderRunning(mob *appsv1.Deployment) (bool, e
 	}
 
 	return false, err
-}
-
-// Updates the Machine OS Builder Deployment, creating it if it does not exist.
-func (optr *Operator) startMachineOSBuilderDeployment(mob *appsv1.Deployment) error {
-	// start machine os builder deployment
-	_, updated, err := mcoResourceApply.ApplyDeployment(optr.kubeClient.AppsV1(), mob)
-	if err != nil {
-		return fmt.Errorf("could not apply Machine OS Builder deployment: %w", err)
-	}
-
-	if updated {
-		if err := optr.waitForDeploymentRollout(mob); err != nil {
-			return fmt.Errorf("could not wait for Machine OS Builder deployment rollout: %w", err)
-		}
-	}
-
-	return nil
 }
 
 // Returns a list of MachineConfigPools which have opted in to layering.
