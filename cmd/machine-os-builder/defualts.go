@@ -7,6 +7,7 @@ import (
 
 	imagev1 "github.com/openshift/api/image/v1"
 	"github.com/openshift/machine-config-operator/internal/clients"
+	"github.com/openshift/machine-config-operator/pkg/controller/build"
 	ctrlcommon "github.com/openshift/machine-config-operator/pkg/controller/common"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -75,11 +76,11 @@ func getBuilderPushSecretName(ctx context.Context, cb *clients.Builder) (string,
 
 // Determines if we should set up the defaults based upon our CLI flags.
 func getOrCreateBuildControllerConfigMap(ctx context.Context, cb *clients.Builder) (*corev1.ConfigMap, error) {
-	cmName := fmt.Sprintf("%s/%s", ctrlcommon.MCONamespace, onClusterBuildConfigMapName)
+	cmName := fmt.Sprintf("%s/%s", ctrlcommon.MCONamespace, build.OnClusterBuildConfigMapName)
 
 	kubeclient := cb.KubeClientOrDie(componentName)
 
-	onClusterBuildConfigMap, err := kubeclient.CoreV1().ConfigMaps(ctrlcommon.MCONamespace).Get(ctx, onClusterBuildConfigMapName, metav1.GetOptions{})
+	onClusterBuildConfigMap, err := kubeclient.CoreV1().ConfigMaps(ctrlcommon.MCONamespace).Get(ctx, build.OnClusterBuildConfigMapName, metav1.GetOptions{})
 	if err == nil {
 		klog.Infof("ConfigMap %s found, will use", cmName)
 		return onClusterBuildConfigMap, nil
@@ -130,14 +131,14 @@ func createDefaults(ctx context.Context, cb *clients.Builder) (*corev1.ConfigMap
 
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      onClusterBuildConfigMapName,
+			Name:      build.OnClusterBuildConfigMapName,
 			Namespace: ctrlcommon.MCONamespace,
 		},
 		Data: map[string]string{
-			"baseImagePullSecretName":    "global-pull-secret-copy",
-			"finalImagePushSecretName":   builderPushSecretName,
-			"finalImagePullspec":         "image-registry.openshift-image-registry.svc:5000/openshift-machine-config-operator/os-image",
-			imageBuilderTypeConfigMapKey: customPodImageBuilder,
+			"baseImagePullSecretName":          "global-pull-secret-copy",
+			"finalImagePushSecretName":         builderPushSecretName,
+			"finalImagePullspec":               "image-registry.openshift-image-registry.svc:5000/openshift-machine-config-operator/os-image",
+			build.ImageBuilderTypeConfigMapKey: build.CustomPodImageBuilder,
 		},
 	}
 

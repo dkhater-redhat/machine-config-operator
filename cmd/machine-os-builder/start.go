@@ -16,13 +16,6 @@ import (
 	"k8s.io/klog/v2"
 )
 
-const (
-	onClusterBuildConfigMapName  string = "on-cluster-build-config"
-	imageBuilderTypeConfigMapKey string = "imageBuilderType"
-	openshiftImageBuilder        string = "openshift-image-builder"
-	customPodImageBuilder        string = "custom-pod-builder"
-)
-
 var (
 	startCmd = &cobra.Command{
 		Use:   "start",
@@ -32,8 +25,9 @@ var (
 	}
 
 	startOpts struct {
-		kubeconfig     string
-		createDefaults bool
+		kubeconfig           string
+		createDefaults       bool
+		copyGlobalPullSecret bool
 	}
 
 	errFoo error = fmt.Errorf("configmap not found, will no-op")
@@ -43,27 +37,28 @@ func init() {
 	rootCmd.AddCommand(startCmd)
 	startCmd.PersistentFlags().StringVar(&startOpts.kubeconfig, "kubeconfig", "", "Kubeconfig file to access a remote cluster (testing only)")
 	startCmd.PersistentFlags().BoolVar(&startOpts.createDefaults, "create-defaults", false, "Create default values for machine-os-builder")
+	startCmd.PersistentFlags().BoolVar(&startOpts.copyGlobalPullSecret, "copy-global-pull-secret", false, "Copy the global pull secret into the MCO namespace")
 }
 
 // Determines which image builder to start based upon the imageBuilderType key
 // in the on-cluster-build-config ConfigMap. Defaults to custom-pod-builder.
 func getImageBuilderType(cm *corev1.ConfigMap) (string, error) {
-	configMapImageBuilder, ok := cm.Data[imageBuilderTypeConfigMapKey]
+	configMapImageBuilder, ok := cm.Data[build.ImageBuilderTypeConfigMapKey]
 	if !ok {
-		klog.Infof("%s not set, defaulting to %q", imageBuilderTypeConfigMapKey, customPodImageBuilder)
-		return customPodImageBuilder, nil
+		klog.Infof("%s not set, defaulting to %q", build.ImageBuilderTypeConfigMapKey, build.CustomPodImageBuilder)
+		return build.CustomPodImageBuilder, nil
 	}
 
 	if ok && configMapImageBuilder == "" {
-		klog.Infof("%s empty, defaulting to %q", imageBuilderTypeConfigMapKey, customPodImageBuilder)
-		return customPodImageBuilder, nil
+		klog.Infof("%s empty, defaulting to %q", build.ImageBuilderTypeConfigMapKey, build.CustomPodImageBuilder)
+		return build.CustomPodImageBuilder, nil
 	}
 
-	if ok && configMapImageBuilder != openshiftImageBuilder && configMapImageBuilder != customPodImageBuilder {
-		return "", fmt.Errorf("invalid %s %q", imageBuilderTypeConfigMapKey, configMapImageBuilder)
+	if ok && configMapImageBuilder != build.OpenshiftImageBuilder && configMapImageBuilder != build.CustomPodImageBuilder {
+		return "", fmt.Errorf("invalid %s %q", build.ImageBuilderTypeConfigMapKey, configMapImageBuilder)
 	}
 
-	klog.Infof("%s set to %q", imageBuilderTypeConfigMapKey, configMapImageBuilder)
+	klog.Infof("%s set to %q", build.ImageBuilderTypeConfigMapKey, configMapImageBuilder)
 	return configMapImageBuilder, nil
 }
 
@@ -85,7 +80,7 @@ func getController(ctx context.Context, cb *clients.Builder) (*build.Controller,
 	buildClients := build.NewClientsFromControllerContext(ctrlCtx)
 	cfg := build.DefaultBuildControllerConfig()
 
-	if imageBuilderType == openshiftImageBuilder {
+	if imageBuilderType == build.OpenshiftImageBuilder {
 		return build.NewWithImageBuilder(cfg, buildClients), nil
 	}
 
@@ -101,7 +96,7 @@ func startController(ctx context.Context, ctrl *build.Controller) {
 
 // Blocks the main goroutine so the pod does not exit.
 func noop() {
-	cmName := fmt.Sprintf("%s/%s", ctrlcommon.MCONamespace, onClusterBuildConfigMapName)
+	cmName := fmt.Sprintf("%s/%s", ctrlcommon.MCONamespace, build.OnClusterBuildConfigMapName)
 	klog.Infof("ConfigMap %q not found, will no-op (for now)", cmName)
 	select {}
 }
