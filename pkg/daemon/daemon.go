@@ -158,6 +158,14 @@ const (
 	// against annotation changes.
 	currentImagePath = "/etc/machine-config-daemon/currentimage"
 
+	// backupConfigPath is where we store the backup image on disk to validate
+	// against annotation changes.
+	backupConfigPath = "/etc/machine-config-daemon/backupConfigPath"
+
+	// backupImagePath is where we store the backup image on disk to validate
+	// against annotation changes.
+	backupImagePath = "/etc/machine-config-daemon/backupImagePath"
+
 	// originalContainerBin is the path at which we've stashed the MCD container's /usr/bin
 	// in the host namespace.  We use this for executing any extra binaries we have in our
 	// container image.
@@ -1798,6 +1806,12 @@ func (dn *Daemon) checkStateOnFirstRun() error {
 
 			return dn.reboot(fmt.Sprintf("Node will reboot into config %v", state.currentConfig.GetName()))
 		}
+
+		// Call the function after OS update/reboot
+		if err := dn.checkAndHandleNotReadyNode(dn.node); err != nil {
+			return err
+		}
+
 		logSystem("No bootstrap pivot required; unlinking bootstrap node annotations")
 
 		// Rename the bootstrap node annotations; the
@@ -1844,6 +1858,9 @@ func (dn *Daemon) checkStateOnFirstRun() error {
 
 	if forceFileExists() {
 		logSystem("Skipping on-disk validation; %s present", constants.MachineConfigDaemonForceFile)
+		if err := dn.backupCurrentState(); err != nil {
+			return err
+		}
 		return dn.triggerUpdate(state.currentConfig, state.desiredConfig, state.currentImage, state.desiredImage)
 	}
 
@@ -2419,4 +2436,111 @@ func forceFileExists() bool {
 
 	// No error means we could stat the file; it exists
 	return err == nil
+}
+
+// backupCurrentState backs up the current configuration state to disk.
+func (dn *Daemon) backupCurrentState() error {
+	klog.Infof("Backing up current configuration state to disk.")
+
+	odc, err := dn.getCurrentConfigOnDisk()
+	if err != nil {
+		klog.Errorf("Failed to get current configuration from disk: %v", err)
+		return err
+	}
+	return dn.storeBackupConfigOnDisk(odc)
+}
+
+// storeBackupConfigOnDisk writes the given configuration to the backup path on disk.
+func (dn *Daemon) storeBackupConfigOnDisk(odc *onDiskConfig) error {
+	klog.Infof("Storing backup configuration on disk.")
+
+	mcJSON, err := json.Marshal(odc.currentConfig)
+	if err != nil {
+		klog.Errorf("Failed to marshal current configuration: %v", err)
+		return err
+	}
+
+	if err := writeFileAtomicallyWithDefaults(backupConfigPath, mcJSON); err != nil {
+		klog.Errorf("Failed to write machine configuration backup to disk: %v", err)
+		return err
+	}
+
+	return writeFileAtomicallyWithDefaults(backupImagePath, []byte(odc.currentImage))
+}
+
+// rollbackToOriginalImage restores the machine to its original image using backups from disk.
+func (dn *Daemon) rollbackToOriginalImage() error {
+	klog.Infof("Rolling back to the original image.")
+
+	// Load backup config from disk
+	odc, err := dn.getBackupConfigFromDisk()
+	if err != nil {
+		klog.Errorf("Failed to get backup configuration from disk: %v", err)
+		return err
+	}
+
+	// Set desired state to the backup state
+	return dn.triggerUpdate(odc.currentConfig, odc.currentConfig, odc.currentImage, odc.currentImage)
+}
+
+// checkAndHandleNotReadyNode handles scenarios when a node is not in a 'Ready' state.
+// It rolls back to the original image if the node is found to be not ready.
+func (dn *Daemon) checkAndHandleNotReadyNode(node *corev1.Node) error {
+	klog.Infof("Checking node readiness for node %s.", node.Name)
+
+	for _, condition := range node.Status.Conditions {
+		if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionFalse {
+			klog.Warningf("Node %s is not ready, rolling back to original image", node.Name)
+			if err := dn.rollbackToOriginalImage(); err != nil {
+				klog.Errorf("Failed to handle NotReady node: %v", err)
+				return fmt.Errorf("failed to handle NotReady node: %w", err)
+			}
+			break
+		}
+	}
+	return nil
+}
+
+type ImageConfig struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+// getBackupConfigFromDisk retrieves the machine and image configurations from backup files on disk.
+func (dn *Daemon) getBackupConfigFromDisk() (*onDiskConfig, error) {
+	klog.Infof("Retrieving backup configuration from disk.")
+
+	// Load MachineConfig backup
+	mcJSON, err := os.Open(backupConfigPath)
+	if err != nil {
+		klog.Errorf("Failed to open machine configuration backup: %v", err)
+		return nil, err
+	}
+	defer mcJSON.Close()
+
+	backupOnDisk := &mcfgv1.MachineConfig{}
+	if err := json.NewDecoder(bufio.NewReader(mcJSON)).Decode(backupOnDisk); err != nil {
+		klog.Errorf("Failed to decode machine configuration backup: %v", err)
+		return nil, err
+	}
+
+	imageJSON, err := os.Open(backupImagePath)
+	if err != nil {
+		klog.Errorf("Failed to open image backup: %v", err)
+		return nil, err
+	}
+	defer imageJSON.Close()
+
+	backupImage := &ImageConfig{}
+	if err := json.NewDecoder(bufio.NewReader(imageJSON)).Decode(backupImage); err != nil {
+		klog.Errorf("Failed to decode image backup: %v", err)
+		return nil, err
+	}
+
+	odc := &onDiskConfig{
+		currentConfig: backupOnDisk,
+		currentImage:  backupImage.URL,
+	}
+
+	return odc, nil
 }
