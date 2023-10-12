@@ -1807,10 +1807,13 @@ func (dn *Daemon) checkStateOnFirstRun() error {
 			return dn.reboot(fmt.Sprintf("Node will reboot into config %v", state.currentConfig.GetName()))
 		}
 
+		klog.Infof("Initiating check for NodeReadiness on node %s", dn.node.Name)
 		// Call the function after OS update/reboot
 		if err := dn.checkAndHandleNotReadyNode(dn.node); err != nil {
+			klog.Errorf("Error during NodeReadiness check for node %s: %v", dn.node.Name, err)
 			return err
 		}
+		klog.Infof("Successfully completed NodeReadiness check for node %s", dn.node.Name)
 
 		logSystem("No bootstrap pivot required; unlinking bootstrap node annotations")
 
