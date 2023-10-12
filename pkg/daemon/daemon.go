@@ -676,12 +676,15 @@ func (dn *Daemon) syncNode(key string) error {
 		newReason := node.Annotations[constants.MachineConfigDaemonReasonAnnotationKey]
 		if oldState != newState {
 			klog.Infof("Transitioned from state: %v -> %v", oldState, newState)
+			klog.Infof("dalia was here")
 		}
 		if oldReason != newReason {
 			klog.Infof("Transitioned from degraded/unreconcilable reason %v -> %v", oldReason, newReason)
 		}
 		dn.node = node
 	}
+
+	klog.Infof("exited deep copy")
 
 	// Take care of the very first sync of the MCD on a node.
 	// This loads the node annotation from the bootstrap (if we're really bootstrapping)
@@ -712,6 +715,8 @@ func (dn *Daemon) syncNode(key string) error {
 		return nil
 	}
 
+	klog.Infof("we are not booting")
+
 	// Check if a previous drain caused us to degrade. If the drain
 	// has yet to complete and we are in a degrade state, continue
 	// to stay in this state
@@ -721,11 +726,15 @@ func (dn *Daemon) syncNode(key string) error {
 		return nil
 	}
 
+	klog.Infof("shared update prep method")
+
 	// Pass to the shared update prep method
 	ufc, err := dn.prepUpdateFromCluster()
 	if err != nil {
 		return fmt.Errorf("prepping update: %w", err)
 	}
+
+	klog.Infof("checking if update is found (ufc is or isnt nil)")
 
 	if ufc != nil {
 		// Only check for config drift if we need to update.
