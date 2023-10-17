@@ -676,15 +676,12 @@ func (dn *Daemon) syncNode(key string) error {
 		newReason := node.Annotations[constants.MachineConfigDaemonReasonAnnotationKey]
 		if oldState != newState {
 			klog.Infof("Transitioned from state: %v -> %v", oldState, newState)
-			klog.Infof("dalia was here")
 		}
 		if oldReason != newReason {
 			klog.Infof("Transitioned from degraded/unreconcilable reason %v -> %v", oldReason, newReason)
 		}
 		dn.node = node
 	}
-
-	klog.Infof("exited deep copy")
 
 	// Take care of the very first sync of the MCD on a node.
 	// This loads the node annotation from the bootstrap (if we're really bootstrapping)
@@ -715,8 +712,6 @@ func (dn *Daemon) syncNode(key string) error {
 		return nil
 	}
 
-	klog.Infof("we are not booting")
-
 	// Check if a previous drain caused us to degrade. If the drain
 	// has yet to complete and we are in a degrade state, continue
 	// to stay in this state
@@ -734,24 +729,26 @@ func (dn *Daemon) syncNode(key string) error {
 		return fmt.Errorf("prepping update: %w", err)
 	}
 
-	klog.Infof("checking if update is found (ufc is or isnt nil)")
-
+	klog.Infof("Initiating post-update check for NodeReadiness on node %s", dn.node.Name)
+	if err := dn.checkAndHandleNotReadyNode(dn.node); err != nil {
+		klog.Errorf("Error during post-update NodeReadiness check for node %s: %v", dn.node.Name, err)
+		return err
+	}
+	klog.Infof("Successfully completed post-update NodeReadiness check for node %s", dn.node.Name)
 	if ufc != nil {
+
+		klog.Infof("only check for config drift if we need to update.")
+
 		// Only check for config drift if we need to update.
 		if err := dn.runPreflightConfigDriftCheck(); err != nil {
 			return err
 		}
 
+		klog.Infof("trigger update")
+
 		if err := dn.triggerUpdate(ufc.currentConfig, ufc.desiredConfig, ufc.currentImage, ufc.desiredImage); err != nil {
 			return err
 		}
-
-		klog.Infof("Initiating post-update check for NodeReadiness on node %s", dn.node.Name)
-		if err := dn.checkAndHandleNotReadyNode(dn.node); err != nil {
-			klog.Errorf("Error during post-update NodeReadiness check for node %s: %v", dn.node.Name, err)
-			return err
-		}
-		klog.Infof("Successfully completed post-update NodeReadiness check for node %s", dn.node.Name)
 
 	}
 	klog.V(2).Infof("Node %s is already synced", node.Name)
