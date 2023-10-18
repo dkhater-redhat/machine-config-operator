@@ -730,7 +730,7 @@ func (dn *Daemon) syncNode(key string) error {
 	}
 
 	klog.Infof("Initiating post-update check for NodeReadiness on node %s", dn.node.Name)
-	if err := dn.checkAndHandleNotReadyNode(dn.node); err != nil {
+	if err := dn.checkAndHandleDegradedNode(dn.node); err != nil {
 		klog.Errorf("Error during post-update NodeReadiness check for node %s: %v", dn.node.Name, err)
 		return err
 	}
@@ -2493,19 +2493,24 @@ func (dn *Daemon) rollbackToOriginalImage() error {
 
 // checkAndHandleNotReadyNode handles scenarios when a node is not in a 'Ready' state.
 // It rolls back to the original image if the node is found to be not ready.
-func (dn *Daemon) checkAndHandleNotReadyNode(node *corev1.Node) error {
-	klog.Infof("Checking node readiness for node %s.", node.Name)
+func (dn *Daemon) checkAndHandleDegradedNode(node *corev1.Node) error {
+	klog.Infof("Checking node state for node %s.", node.Name)
 
-	for _, condition := range node.Status.Conditions {
-		if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionFalse {
-			klog.Warningf("Node %s is not ready, rolling back to original image", node.Name)
+	degradedStateAnnotation := "machineconfiguration.openshift.io/state"
+	degradedState := "Degraded"
+
+	if state, exists := node.Annotations[degradedStateAnnotation]; exists {
+		if state == degradedState {
+			klog.Warningf("Node %s is degraded, rolling back to original image", node.Name)
 			if err := dn.rollbackToOriginalImage(); err != nil {
-				klog.Errorf("Failed to handle NotReady node: %v", err)
-				return fmt.Errorf("failed to handle NotReady node: %w", err)
+				klog.Errorf("Failed to handle degraded node: %v", err)
+				return fmt.Errorf("failed to handle degraded node: %w", err)
 			}
-			break
 		}
+	} else {
+		klog.Infof("No degraded state annotation present on node %s", node.Name)
 	}
+
 	return nil
 }
 
