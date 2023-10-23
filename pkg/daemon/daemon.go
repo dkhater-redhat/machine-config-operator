@@ -721,13 +721,19 @@ func (dn *Daemon) syncNode(key string) error {
 		return nil
 	}
 
-	klog.Infof("shared update prep method")
-
 	// Pass to the shared update prep method
 	ufc, err := dn.prepUpdateFromCluster()
 	if err != nil {
 		return fmt.Errorf("prepping update: %w", err)
 	}
+
+	// Create backup of current config and image before proceeding
+	err = createBackupConfig()
+	if err != nil {
+		klog.Errorf("Error creating backup config and image: %v", err)
+		return err // Returning error here because backup is critical before proceeding
+	}
+	klog.Infof("Backup of current config and image created successfully.")
 
 	klog.Infof("Initiating post-update check for NodeReadiness on node %s", dn.node.Name)
 	if err := dn.checkAndHandleDegradedNode(dn.node); err != nil {
@@ -2556,4 +2562,36 @@ func (dn *Daemon) getBackupConfigFromDisk() (*onDiskConfig, error) {
 	}
 
 	return odc, nil
+}
+
+// createBackupConfig reads the current configuration and image from disk
+// and writes them to the backup locations.
+func createBackupConfig() error {
+	// Read the current configuration from file
+	currentConfig, err := os.ReadFile(currentConfigPath)
+	if err != nil {
+		return fmt.Errorf("failed to read current config: %w", err)
+	}
+
+	// Write the configuration to the backup file
+	if err := os.WriteFile(backupConfigPath, currentConfig, 0644); err != nil {
+		return fmt.Errorf("failed to write backup config to file: %w", err)
+	}
+
+	klog.Info("Backup configuration successfully written to disk.")
+
+	// Read the current image from file
+	currentImage, err := os.ReadFile(currentImagePath)
+	if err != nil {
+		return fmt.Errorf("failed to read current image: %w", err)
+	}
+
+	// Write the image to the backup file
+	if err := os.WriteFile(backupImagePath, currentImage, 0644); err != nil {
+		return fmt.Errorf("failed to write backup image to file: %w", err)
+	}
+
+	klog.Info("Backup image successfully written to disk.")
+
+	return nil
 }
