@@ -127,6 +127,9 @@ type Daemon struct {
 	currentConfigPath string
 	currentImagePath  string
 
+	backupConfigPath string
+	backupImagePath  string
+
 	// Config Drift Monitor
 	configDriftMonitor ConfigDriftMonitor
 
@@ -2530,7 +2533,7 @@ func (dn *Daemon) getBackupConfigFromDisk() (*onDiskConfig, error) {
 	klog.Infof("Retrieving backup configuration from disk.")
 
 	// Load MachineConfig backup
-	mcJSON, err := os.Open(backupConfigPath)
+	mcJSON, err := os.Open(dn.backupConfigPath)
 	if err != nil {
 		klog.Errorf("Failed to open machine configuration backup: %v", err)
 		return nil, err
@@ -2543,12 +2546,24 @@ func (dn *Daemon) getBackupConfigFromDisk() (*onDiskConfig, error) {
 		return nil, err
 	}
 
-	imageJSON, err := os.Open(backupImagePath)
+	imageJSON, err := os.Open(dn.backupImagePath)
 	if err != nil {
 		klog.Errorf("Failed to open image backup: %v", err)
 		return nil, err
 	}
 	defer imageJSON.Close()
+
+	// Check if the file is empty
+	info, err := imageJSON.Stat()
+	if err != nil {
+		klog.Errorf("Failed to get file info: %v", err)
+		return nil, err
+	}
+
+	if info.Size() == 0 {
+		klog.Error("Image backup file is empty.")
+		return nil, fmt.Errorf("image backup file is empty")
+	}
 
 	backupImage := &ImageConfig{}
 	if err := json.NewDecoder(bufio.NewReader(imageJSON)).Decode(backupImage); err != nil {
