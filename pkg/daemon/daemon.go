@@ -127,9 +127,6 @@ type Daemon struct {
 	currentConfigPath string
 	currentImagePath  string
 
-	backupConfigPath string
-	backupImagePath  string
-
 	// Config Drift Monitor
 	configDriftMonitor ConfigDriftMonitor
 
@@ -2532,8 +2529,21 @@ type ImageConfig struct {
 func (dn *Daemon) getBackupConfigFromDisk() (*onDiskConfig, error) {
 	klog.Infof("Retrieving backup configuration from disk.")
 
+	paths := []string{backupConfigPath, backupImagePath}
+
+	for _, path := range paths {
+		dirPath := filepath.Dir(path)
+		if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+			err = os.MkdirAll(dirPath, 0755)
+			if err != nil {
+				klog.Errorf("Failed to create directory: %v", err)
+				return nil, err
+			}
+		}
+	}
+
 	// Load MachineConfig backup
-	mcJSON, err := os.Open(dn.backupConfigPath)
+	mcJSON, err := os.Open(backupConfigPath)
 	if err != nil {
 		klog.Errorf("Failed to open machine configuration backup: %v", err)
 		return nil, err
@@ -2546,7 +2556,7 @@ func (dn *Daemon) getBackupConfigFromDisk() (*onDiskConfig, error) {
 		return nil, err
 	}
 
-	imageJSON, err := os.Open(dn.backupImagePath)
+	imageJSON, err := os.Open(backupImagePath)
 	if err != nil {
 		klog.Errorf("Failed to open image backup: %v", err)
 		return nil, err
