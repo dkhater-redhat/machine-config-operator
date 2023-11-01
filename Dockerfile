@@ -21,6 +21,12 @@ RUN cd / && tar xf /tmp/instroot.tar && rm -f /tmp/instroot.tar
 COPY --from=rhel9-builder /go/src/github.com/openshift/machine-config-operator/instroot/usr/bin/machine-config-daemon /usr/bin/machine-config-daemon.rhel9
 COPY install /manifests
 
+FROM quay.io/zzlotnik/machine-config-operator:nmstate-4.14
+ARG TAGS=""
+COPY --from=builder /go/src/github.com/openshift/machine-config-operator/instroot.tar /tmp/instroot.tar
+RUN cd / && tar xf /tmp/instroot.tar && rm -f /tmp/instroot.tar
+COPY install /manifests
+
 RUN if [ "${TAGS}" = "fcos" ]; then \
     # comment out non-base/extensions image-references entirely for fcos
     sed -i '/- name: rhel-coreos-/,+3 s/^/#/' /manifests/image-references && \
@@ -31,16 +37,9 @@ RUN if [ "${TAGS}" = "fcos" ]; then \
     elif [ "${TAGS}" = "scos" ]; then \
     # rewrite image names for scos
     sed -i 's/rhel-coreos/centos-stream-coreos-9/g' /manifests/*; fi && \
-    # pin nmstate to 2.2.9 until we update to https://github.com/openshift/machine-config-operator/pull/3720 \
-    . /etc/os-release; \
-    NMSTATE_PKG=nmstate-2.2.9-6.rhaos4.14.el8; \
-    if [ "${ID}" == "centos" ]; then \
-        GNU_ARCH=$(uname -m); \
-        NMSTATE_PKG="https://kojihub.stream.centos.org/kojifiles/packages/nmstate/2.2.9/1.el9/${GNU_ARCH}/nmstate-2.2.9-1.el9.${GNU_ARCH}.rpm"; \
-    fi && \
-    dnf -y install ${NMSTATE_PKG} && \
-    if ! rpm -q util-linux; then dnf install -y util-linux; fi && \
-    dnf clean all && rm -rf /var/cache/dnf/*
+    # pin nmstate to 2.2.9 until we update to https://github.com/openshift/machine-config-operator/pull/3720
+    cp /usr/bin/machine-config-daemon /usr/bin/machine-config-daemon.rhel9
+
 COPY templates /etc/mcc/templates
 ENTRYPOINT ["/usr/bin/machine-config-operator"]
 LABEL io.openshift.release.operator true

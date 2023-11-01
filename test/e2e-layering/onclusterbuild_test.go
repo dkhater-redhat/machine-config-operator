@@ -249,8 +249,13 @@ func TestSSHKeyAndPasswordForOSBuilder(t *testing.T) {
 	sshKeyContent := "testsshkey11"
 	passwordHash := "testpassword11"
 
+<<<<<<< Updated upstream
 	// retreive initial etc/shadow contents
 	initialEtcShadowContents := helpers.ExecCmdOnNode(t, cs, osNode, "grep", "^core:", "/rootfs/etc/shadow")
+=======
+	// wait for pool to complete building
+	helpers.WaitForPoolToBeUpdated(t, cs, layeredMCPName)
+>>>>>>> Stashed changes
 
 	testIgnConfig.Passwd.Users = []ign3types.PasswdUser{
 		{
@@ -260,6 +265,7 @@ func TestSSHKeyAndPasswordForOSBuilder(t *testing.T) {
 		},
 	}
 
+<<<<<<< Updated upstream
 	testConfig := &mcfgv1.MachineConfig{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "99-test-ssh-and-password",
@@ -286,6 +292,15 @@ func TestSSHKeyAndPasswordForOSBuilder(t *testing.T) {
 	err = helpers.WaitForPoolComplete(t, cs, layeredMCPName, renderedConfig)
 	require.Nil(t, err)
 	t.Logf("Pool completed updating")
+=======
+	// Now, rollback to non-layered configuration
+	helpers.UnlabelMCP(t, cs, layeredMCPName, ctrlcommon.LayeringEnabledPoolLabel)
+
+	// checking to see if deployment exists
+	exists, err = helpers.CheckDeploymentExists(cs, "machine-os-builder", "openshift-machine-config-operator")
+	require.NoError(t, err, "Failed to check if Machine OS builder deployment doesnt exist")
+	require.True(t, exists, "Machine OS builder deployment still exists after rollback")
+>>>>>>> Stashed changes
 
 	// Validate the SSH key and password
 	osNode = helpers.GetSingleNodeByRole(t, cs, layeredMCPName) // Re-fetch node with updated configurations
