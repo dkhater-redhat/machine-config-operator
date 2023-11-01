@@ -138,7 +138,10 @@ func waitForPoolToReachState(t *testing.T, cs *framework.ClientSet, poolName str
 		return condFunc(mcp), nil
 	})
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
 	require.NoError(t, err, "MachineConfigPool %q did not reach desired state", poolName)

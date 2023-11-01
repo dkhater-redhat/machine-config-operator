@@ -250,8 +250,13 @@ func TestSSHKeyAndPasswordForOSBuilder(t *testing.T) {
 	passwordHash := "testpassword11"
 
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 	// retreive initial etc/shadow contents
 	initialEtcShadowContents := helpers.ExecCmdOnNode(t, cs, osNode, "grep", "^core:", "/rootfs/etc/shadow")
+=======
+	// wait for pool to complete building
+	helpers.WaitForPoolToBeUpdated(t, cs, layeredMCPName)
+>>>>>>> Stashed changes
 =======
 	// wait for pool to complete building
 	helpers.WaitForPoolToBeUpdated(t, cs, layeredMCPName)
