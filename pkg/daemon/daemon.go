@@ -2286,6 +2286,7 @@ func (dn *Daemon) completeUpdate(desiredConfigName string) error {
 
 func (dn *Daemon) triggerUpdate(currentConfig, desiredConfig *mcfgv1.MachineConfig, currentImage, desiredImage string) error {
 	// If both of the image annotations are empty, this is a regular MachineConfig update.
+	//test
 	if desiredImage == "" && currentImage == "" {
 		return dn.triggerUpdateWithMachineConfig(currentConfig, desiredConfig, true)
 	}
