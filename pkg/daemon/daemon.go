@@ -27,10 +27,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	coreinformersv1 "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 
 	corev1lister "k8s.io/client-go/listers/core/v1"
@@ -1052,7 +1054,9 @@ func (dn *Daemon) syncNodeHypershift(key string) error {
 
 	// For us to be here, DesiredDrainerAnnotationKey == LastAppliedDrainerAnnotationKey == drain-targetHash
 	// perform the actual update
-	if err := dn.updateHypershift(&currentConfig, &desiredConfig, mcDiff); err != nil {
+	// func (dn *Daemon) updateHypershift(oldConfig, newConfig *mcfgv1.MachineConfig, diff *machineConfigDiff) (retErr error) {
+	if err := dn.update(&currentConfig, &desiredConfig, "", "", true, false, false); err != nil {
+		// if err := dn.updateHypershift(&currentConfig, &desiredConfig, mcDiff); err != nil {
 		return fmt.Errorf("failed to update configuration: %w", err)
 	}
 
@@ -1192,7 +1196,7 @@ func (dn *Daemon) RunFirstbootCompleteMachineconfig() error {
 	// This "false" is a compatibility for IBM's use case, where they are using the MCD to write the full configuration instead of just
 	// the encapsulated config. This shouldn't affect normal OCP operations, but will allow anyone using this code to write configs to
 	// still get the kubelet cert
-	err = dn.update(oldConfig, &mc, false)
+	err = dn.update(oldConfig, &mc, "", "", false, false, false)
 	if err != nil {
 		return err
 	}
@@ -2121,7 +2125,7 @@ func (dn *Daemon) runOnceFromMachineConfig(machineConfig mcfgv1.MachineConfig, c
 	}
 	if contentFrom == onceFromLocalConfig {
 		// Execute update without hitting the cluster
-		return dn.update(nil, &machineConfig, false)
+		return dn.update(nil, &machineConfig, "", "", false, false, false)
 	}
 	// Otherwise return an error as the input format is unsupported
 	return fmt.Errorf("%v is not a path nor url; can not run once", contentFrom)
@@ -2285,27 +2289,82 @@ func (dn *Daemon) completeUpdate(desiredConfigName string) error {
 }
 
 func (dn *Daemon) triggerUpdate(currentConfig, desiredConfig *mcfgv1.MachineConfig, currentImage, desiredImage string) error {
+	// Shut down the Config Drift Monitor since we'll be performing an update
+	// and the config will "drift" while the update is occurring.
+	dn.stopConfigDriftMonitor()
+
 	// If both of the image annotations are empty, this is a regular MachineConfig update.
 	if desiredImage == "" && currentImage == "" {
 		return dn.triggerUpdateWithMachineConfig(currentConfig, desiredConfig, true)
 	}
 
 	// If the desired image annotation is empty, but the current image is not
-	// empty, this should be a regular MachineConfig update.
-	//
-	// However, the node will not roll back from a layered config to a
-	// non-layered config without admin intervention; so we should emit an error
-	// for now.
+	// empty. This means we want to revert the node from a layered config state
+	// to a non-layered config state.
 	if desiredImage == "" && currentImage != "" {
-		return fmt.Errorf("rolling back from a layered to non-layered configuration is not currently supported")
+		return dn.revertToNonLayeredState(desiredConfig, currentImage)
 	}
 
-	// Shut down the Config Drift Monitor since we'll be performing an update
-	// and the config will "drift" while the update is occurring.
-	dn.stopConfigDriftMonitor()
-
 	klog.Infof("Performing layered OS update")
-	return dn.updateOnClusterBuild(currentConfig, desiredConfig, currentImage, desiredImage, true)
+	// return dn.updateOnClusterBuild(currentConfig, desiredConfig, currentImage, desiredImage, true)
+	return dn.update(currentConfig, desiredConfig, currentImage, desiredImage, false, true, true)
+
+}
+
+func (dn *Daemon) revertToNonLayeredState(desiredConfig *mcfgv1.MachineConfig, currentImage string) error {
+	// Get the default OS image from the machine-config-osimageurl ConfigMap or the machine-config-images ConfigMap.
+	defaultOSImage, err := dn.getDefaultOSPullspec()
+	if err != nil {
+		return fmt.Errorf("failed to get default OS image pull spec: %w", err)
+	}
+
+	// Perform the image update with the logic that was previously in updateImage
+	err = dn.PerformImageUpdate(currentImage, defaultOSImage, false)
+	if err != nil {
+		return err
+	}
+
+	// Update the on-disk configuration with the new MachineConfig and new image without the conditional.
+	// Since writeNewImageToOnDiskConfig is always false in the previous call, it is assumed that
+	// we do not write the new image to the on-disk config in the revertToNonLayeredState scenario.
+	odc := &onDiskConfig{
+		currentConfig: desiredConfig,
+		currentImage:  defaultOSImage, // Set the current image to the default obtained earlier
+	}
+	if err := dn.storeCurrentConfigOnDisk(odc); err != nil {
+		return err
+	}
+
+	// Trigger a reboot to apply the new image and config
+	return dn.reboot(fmt.Sprintf("Node will reboot into image %s", defaultOSImage))
+}
+
+// getDefaultOSPullspec retrieves the default OS image URL from a ConfigMap.
+func (dn *Daemon) getDefaultOSPullspec() (string, error) {
+	// Setup Kubernetes client
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return "", err
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return "", err
+	}
+
+	// Fetch the ConfigMap
+	configMapName := "machine-config-osimageurl"
+	configMap, err := clientset.CoreV1().ConfigMaps(ctrlcommon.MCONamespace).Get(context.TODO(), configMapName, v1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+
+	// Retrieve the OS image URL from the ConfigMap data
+	defaultOSImage, ok := configMap.Data["defaultOSImage"]
+	if !ok {
+		return "", fmt.Errorf("key 'defaultOSImage' not found in ConfigMap '%s'", configMapName)
+	}
+
+	return defaultOSImage, nil
 }
 
 // triggerUpdateWithMachineConfig starts the update. It queries the cluster for
@@ -2338,7 +2397,7 @@ func (dn *Daemon) triggerUpdateWithMachineConfig(currentConfig, desiredConfig *m
 	dn.stopConfigDriftMonitor()
 
 	// run the update process. this function doesn't currently return.
-	return dn.update(currentConfig, desiredConfig, skipCertificateWrite)
+	return dn.update(currentConfig, desiredConfig, "", "", false, false, skipCertificateWrite)
 }
 
 // validateKernelArguments checks that the current boot has all arguments specified
