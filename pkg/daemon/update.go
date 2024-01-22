@@ -666,6 +666,7 @@ func (dn *Daemon) update(oldConfig, newConfig *mcfgv1.MachineConfig, oldImage, n
 	oldConfigName := oldConfig.GetName()
 	newConfigName := newConfig.GetName()
 
+	klog.Infof("this contains the new code")
 	// Parsing old and new Ignition configurations
 	oldIgnConfig, err := ctrlcommon.ParseAndConvertConfig(oldConfig.Spec.Config.Raw)
 	if err != nil {
