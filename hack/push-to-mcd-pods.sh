@@ -19,7 +19,14 @@ push_binary_to_pod() {
   local -r pod="$1"
   local -r bin_path="$2"
 
-  local -r local_bin_sha256sum="$(sha256sum "$bin_path" | awk '{print $1;}')"
+  local local_bin_sha256sum
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS
+    local_bin_sha256sum="$(shasum -a 256 "$bin_path" | awk '{print $1;}')"
+  else
+    # Assume Linux
+    local_bin_sha256sum="$(sha256sum "$bin_path" | awk '{print $1;}')"
+  fi
 
   # Check if we have the file on the pod in question
   oc rsh -n "$MCO_NAMESPACE" -c "$MCD_CONTAINER_NAME" "pod/$pod" sha256sum "$ROOTFS_MCD_PATH"
@@ -93,8 +100,14 @@ main() {
 
   local -r bin_path="./_output/$cluster_os/$cluster_arch/machine-config-daemon"
 
-  # Get the hash of our MCD binary; useful to compare to the startup value in the MCD pod logs
-  sha256sum "$bin_path"
+  # Get the hash of our MCD binary; use sha256sum on Linux and shasum -a 256 on Mac
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS
+    shasum -a 256 "$bin_path"
+  else
+    # Assume Linux
+    sha256sum "$bin_path"
+  fi
 
   if [ -z "$target_mcd_pod" ]; then
     # We're not targeting a specific pod, so push the binary to all MCD pods
