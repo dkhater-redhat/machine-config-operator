@@ -19,10 +19,10 @@ push_binary_to_pod() {
   local -r pod="$1"
   local -r bin_path="$2"
 
-  local -r local_bin_sha256sum="$(shasum "$bin_path" | awk '{print $1;}')"
+  local -r local_bin_sha256sum="$(sha256sum "$bin_path" | awk '{print $1;}')"
 
   # Check if we have the file on the pod in question
-  oc rsh -n "$MCO_NAMESPACE" -c "$MCD_CONTAINER_NAME" "pod/$pod" shasum "$ROOTFS_MCD_PATH"
+  oc rsh -n "$MCO_NAMESPACE" -c "$MCD_CONTAINER_NAME" "pod/$pod" sha256sum "$ROOTFS_MCD_PATH"
   local -r has_file_retval="$?"
 
   # We don't have the file, so lets copy it
