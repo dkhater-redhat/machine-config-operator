@@ -94,7 +94,7 @@ main() {
   local -r bin_path="./_output/$cluster_os/$cluster_arch/machine-config-daemon"
 
   # Get the hash of our MCD binary; useful to compare to the startup value in the MCD pod logs
-  sha256sum "$bin_path"
+  shasum "$bin_path"
 
   if [ -z "$target_mcd_pod" ]; then
     # We're not targeting a specific pod, so push the binary to all MCD pods
