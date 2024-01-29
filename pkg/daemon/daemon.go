@@ -1881,6 +1881,7 @@ func (dn *Daemon) updateSSHKeyLocationIfNeeded(cfg *mcfgv1.MachineConfig) error 
 
 	if !sshKeyLocationUpdateRequired {
 		klog.Infof("SSH key location (%q) up-to-date!", constants.RHCOS9SSHKeyPath)
+		klog.Infof("dalia was here")
 		return nil
 	}
 
