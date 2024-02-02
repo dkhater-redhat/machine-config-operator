@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+# Define your registry host
+REGISTRY_HOST=$(oc get -n openshift-image-registry -o json route/image-registry | jq -r ".spec.host")
+
+# Path to Docker Desktop's settings.json
+DOCKER_SETTINGS_FILE="$HOME/Library/Group Containers/group.com.docker/settings.json"
+
+# Add the registry to Docker Desktop's list of insecure registries
+if jq -e . "$DOCKER_SETTINGS_FILE" > /dev/null; then
+    # Check if the registry is already in the list
+    if ! jq -e --arg reg "$REGISTRY_HOST" '.insecureRegistries | index($reg)' "$DOCKER_SETTINGS_FILE" > /dev/null; then
+        echo "Adding $REGISTRY_HOST to Docker Desktop's list of insecure registries."
+        # Add the registry and update the file
+        jq --arg reg "$REGISTRY_HOST" '.insecureRegistries += [$reg]' "$DOCKER_SETTINGS_FILE" > temp.json && mv temp.json "$DOCKER_SETTINGS_FILE"
+    else
+        echo "Registry $REGISTRY_HOST is already configured as insecure."
+    fi
+else
+    echo "Error reading Docker settings. Please ensure Docker Desktop is installed correctly."
+    exit 1
+fi
+
+# Notify to restart Docker Desktop
+echo "Please restart Docker Desktop for the changes to take effect."
