@@ -317,6 +317,7 @@ func (dn *Daemon) ClusterConnect(
 	mcInformer mcfginformersv1.MachineConfigInformer,
 	nodeInformer coreinformersv1.NodeInformer,
 	ccInformer mcfginformersv1.ControllerConfigInformer,
+	mcpInformer mcfginformersv1.MachineConfigPoolInformer,
 	kubeletHealthzEnabled bool,
 	kubeletHealthzEndpoint string,
 	featureGatesAccessor featuregates.FeatureGateAccess,
@@ -335,6 +336,16 @@ func (dn *Daemon) ClusterConnect(
 	nodeInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    dn.handleNodeEvent,
 		UpdateFunc: func(oldObj, newObj interface{}) { dn.handleNodeEvent(newObj) },
+	})
+
+	mcpInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			oldMCP := oldObj.(*mcfgv1.MachineConfigPool)
+			newMCP := newObj.(*mcfgv1.MachineConfigPool)
+			if labelRemoved(oldMCP, newMCP, "machineconfiguration.openshift.io/layering-enabled") {
+				go dn.handleLayeringDisabled(newMCP)
+			}
+		},
 	})
 	dn.nodeLister = nodeInformer.Lister()
 	dn.nodeListerSynced = nodeInformer.Informer().HasSynced
@@ -1881,7 +1892,7 @@ func (dn *Daemon) updateSSHKeyLocationIfNeeded(cfg *mcfgv1.MachineConfig) error 
 
 	if !sshKeyLocationUpdateRequired {
 		klog.Infof("SSH key location (%q) up-to-date!", constants.RHCOS9SSHKeyPath)
-		klog.Infof("dalia was here")
+		klog.Infof("dalia was here3")
 		return nil
 	}
 
@@ -2293,51 +2304,89 @@ func (dn *Daemon) triggerUpdate(currentConfig, desiredConfig *mcfgv1.MachineConf
 	// Shut down the Config Drift Monitor since we'll be performing an update
 	// and the config will "drift" while the update is occurring.
 	dn.stopConfigDriftMonitor()
+	klog.Infof("Update Triggered")
 
+	klog.Infof("current immage annotation: %s, desired image annotation: %s", currentImage, desiredImage)
 	// If both of the image annotations are empty, this is a regular MachineConfig update.
 	if desiredImage == "" && currentImage == "" {
+		klog.Infof("Initiating regular MachineConfigUpdate")
 		return dn.triggerUpdateWithMachineConfig(currentConfig, desiredConfig, true)
 	}
 
 	// If the desired image annotation is empty, but the current image is not
 	// empty. This means we want to revert the node from a layered config state
 	// to a non-layered config state.
-	if desiredImage == "" && currentImage != "" {
-		return dn.revertToNonLayeredState(desiredConfig, currentImage)
-	}
+	// if desiredImage == "" && currentImage != "" {
+	// 	klog.Infof("Reverting back to non layered state")
+	// 	return dn.revertToNonLayeredState(desiredConfig, currentImage)
+	// }
 
 	klog.Infof("Performing layered OS update")
 	// return dn.updateOnClusterBuild(currentConfig, desiredConfig, currentImage, desiredImage, true)
 	return dn.update(currentConfig, desiredConfig, currentImage, desiredImage, false, true, true)
-
 }
 
-func (dn *Daemon) revertToNonLayeredState(desiredConfig *mcfgv1.MachineConfig, currentImage string) error {
-	// Get the default OS image from the machine-config-osimageurl ConfigMap or the machine-config-images ConfigMap.
+func labelRemoved(oldMCP, newMCP *mcfgv1.MachineConfigPool, label string) bool {
+	// Check if the label existed in the old MCP and is removed in the new MCP
+	_, oldLabelExists := oldMCP.Labels[label]
+	_, newLabelExists := newMCP.Labels[label]
+	return oldLabelExists && !newLabelExists
+}
+
+// handleLayeringDisabled checks if the layering label is removed and reverts the node to a non-layered state
+func (dn *Daemon) handleLayeringDisabled(newMCP *mcfgv1.MachineConfigPool) {
+	if newMCP.Labels == nil || newMCP.Labels["machineconfiguration.openshift.io/layering-enabled"] != "" {
+		// Layering is still enabled or the label is not set, nothing to do
+		return
+	}
+
+	klog.Info("Layering disabled, reverting to non-layered state")
+
+	// Step 1: Get the current state and configs
+	state, err := dn.getStateAndConfigs()
+	if err != nil {
+		klog.Errorf("Failed to get state and configs: %v", err)
+		return
+	}
+
+	// Step 2: Determine if we are in a layered state
+	if state.currentImage == "" {
+		// We are not in a layered state, nothing to do
+		klog.Info("Node is not in a layered state, no action required")
+		return
+	}
+
+	// Step 3: Get the default OS image (non-layered state)
 	defaultOSImage, err := dn.getDefaultOSPullspec()
 	if err != nil {
-		return fmt.Errorf("failed to get default OS image pull spec: %w", err)
+		klog.Errorf("Failed to get default OS image: %v", err)
+		return
 	}
 
-	// Perform the image update with the logic that was previously in updateImage
-	err = dn.PerformImageUpdate(currentImage, defaultOSImage, false)
+	// Step 4: Trigger rollback to the default OS image
+	err = dn.PerformImageUpdate(state.currentImage, defaultOSImage, false)
 	if err != nil {
-		return err
+		klog.Errorf("Failed to revert to default OS image: %v", err)
+		return
 	}
 
-	// Update the on-disk configuration with the new MachineConfig and new image without the conditional.
-	// Since writeNewImageToOnDiskConfig is always false in the previous call, it is assumed that
-	// we do not write the new image to the on-disk config in the revertToNonLayeredState scenario.
+	// Step 5: Store the reverted state on disk
 	odc := &onDiskConfig{
-		currentConfig: desiredConfig,
-		currentImage:  defaultOSImage, // Set the current image to the default obtained earlier
+		currentConfig: state.currentConfig,
+		currentImage:  defaultOSImage,
 	}
 	if err := dn.storeCurrentConfigOnDisk(odc); err != nil {
-		return err
+		klog.Errorf("Failed to store current config on disk: %v", err)
+		return
 	}
 
-	// Trigger a reboot to apply the new image and config
-	return dn.reboot(fmt.Sprintf("Node will reboot into image %s", defaultOSImage))
+	// Step 6: Trigger a reboot to apply the changes
+	if err := dn.reboot("Node will reboot to revert to non-layered state"); err != nil {
+		klog.Errorf("Failed to reboot node: %v", err)
+		return
+	}
+
+	klog.Info("Successfully triggered revert to non-layered state")
 }
 
 // getDefaultOSPullspec retrieves the default OS image URL from a ConfigMap.

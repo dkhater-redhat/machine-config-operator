@@ -128,6 +128,7 @@ func (tc upgradeMonitorTestCase) run(t *testing.T) {
 		i.Machineconfiguration().V1().MachineConfigs(),
 		k8sI.Core().V1().Nodes(),
 		i.Machineconfiguration().V1().ControllerConfigs(),
+		i.Machineconfiguration().V1().MachineConfigPools(),
 		false,
 		"",
 		fgAccess,
