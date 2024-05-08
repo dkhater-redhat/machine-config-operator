@@ -12,7 +12,7 @@ RUN --mount=type=cache,target=/go/rhel9/.cache,z \
     make install DESTDIR=./instroot-rhel9 && tar -C instroot-rhel9 -cf instroot-rhel9.tar .
 
 # Add a RHEL 8 builder to compile the RHEL 8 compatible binaries
-FROM registry.ci.openshift.org/ocp/builder:rhel-8-golang-1.21-openshift-4.16 AS rhel8-builder
+FROM registry.ci.openshift.org/ocp-multi/builder:rhel-9-golang-latest-openshift-4.16 AS rhel8-builder
 ARG TAGS=""
 WORKDIR /go/src/github.com/openshift/machine-config-operator
 # Copy the RHEL 8 machine-config-daemon binary and rename

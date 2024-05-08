@@ -104,6 +104,11 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 		return fmt.Errorf("could not get ControllerConfig: %v", err)
 	}
 
+	klog.Infof("Managing certificates based on current configuration.")
+	if err := dn.manageCertificates(controllerConfig); err != nil {
+		return fmt.Errorf("error managing certificates: %v", err)
+	}
+
 	if dn.node == nil {
 		// Node has not yet initialized, wait to resync
 		dn.enqueueControllerConfigAfter(controllerConfig, ccRequeueDelay)
@@ -382,6 +387,34 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 	}
 
 	klog.V(4).Infof("Finished syncing ControllerConfig %q (%v)", key, time.Since(startTime))
+	return nil
+}
+
+func (dn *Daemon) manageCertificates(controllerConfig *mcfgv1.ControllerConfig) error {
+	// Check for removal of cloudCA certificate in the controllerConfig
+	cloudCA := controllerConfig.Spec.CloudProviderCAData
+	if len(cloudCA) == 0 {
+		klog.Info("controllerConfig: cloud-provider CA data is empty, attempting to remove certificate from node")
+		// Certificate has been removed from the controllerConfig, remove it from the node
+		err := os.Remove("/etc/kubernetes/static-pod-resources/configmaps/cloud-config/ca-bundle.pem")
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove cloud CA certificate from node: %v", err)
+		}
+		klog.Info("Removed cloud CA certificate from node")
+	}
+
+	// Check for removal of AdditionalTrustBundle in the controllerConfig
+	additionalTrustBundle := controllerConfig.Spec.AdditionalTrustBundle
+	if len(additionalTrustBundle) == 0 {
+		klog.Info("controllerConfig: additional trust bundle is empty, attempting to remove certificate from node")
+		// Certificate has been removed from the controllerConfig, remove it from the node
+		err := os.Remove("/etc/pki/ca-trust/source/anchors/openshift-config-user-ca-bundle.crt")
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove additional trust bundle from node: %v", err)
+		}
+		klog.Info("Removed additional trust bundle from node")
+	}
+
 	return nil
 }
 
