@@ -234,6 +234,9 @@ func (optr *Operator) syncCloudConfig(spec *mcfgv1.ControllerConfigSpec, infra *
 				return fmt.Errorf("%s/%s configmap is required on platform %s but not found: %w",
 					"openshift-config-managed", "kube-cloud-config", infra.Status.PlatformStatus.Type, err)
 			}
+			// Clear CA data and CloudProviderConfig if the ConfigMap is not found
+			spec.CloudProviderCAData = nil
+			spec.CloudProviderConfig = ""
 			return nil
 		}
 		return err
@@ -250,9 +253,12 @@ func (optr *Operator) syncCloudConfig(spec *mcfgv1.ControllerConfigSpec, infra *
 		spec.CloudProviderConfig = cc
 	}
 
+	// Handle the removal of CA data
 	caCert, err := getCAsFromConfigMap(cm, "ca-bundle.pem")
 	if err == nil {
 		spec.CloudProviderCAData = caCert
+	} else {
+		spec.CloudProviderCAData = nil
 	}
 	return nil
 }
@@ -427,7 +433,7 @@ func (optr *Operator) syncRenderConfig(_ *renderConfig) error {
 				}
 				_, err = optr.kubeClient.CoreV1().ConfigMaps("openshift-config-managed").Patch(context.TODO(), "merged-trusted-image-registry-ca", types.MergePatchType, patchBytes, metav1.PatchOptions{})
 				if err != nil {
-					return fmt.Errorf("Could not patch merged-trusted-image-registry-ca with data %s: %w", string(patchBytes), err)
+					return fmt.Errorf("could not patch merged-trusted-image-registry-ca with data %s: %w", string(patchBytes), err)
 				}
 				break
 			}
@@ -542,14 +548,13 @@ func (optr *Operator) syncRenderConfig(_ *renderConfig) error {
 	// this is the trusted bundle specific for proxy things and can differ from the generic one above.
 	if proxy != nil && proxy.Spec.TrustedCA.Name != "" && proxy.Spec.TrustedCA.Name != "user-ca-bundle" {
 		proxyTrustBundle, err := optr.getCAsFromConfigMap("openshift-config", proxy.Spec.TrustedCA.Name, "ca-bundle.crt")
-		if err != nil {
-			return err
-		}
-		if len(proxyTrustBundle) > 0 {
-			if !certPool.AppendCertsFromPEM(proxyTrustBundle) {
-				return fmt.Errorf("configmap %s/%s doesn't have a valid PEM bundle", "openshift-config", proxy.Spec.TrustedCA.Name)
+		if err == nil {
+			if len(proxyTrustBundle) > 0 {
+				if !certPool.AppendCertsFromPEM(proxyTrustBundle) {
+					return fmt.Errorf("configmap %s/%s doesn't have a valid PEM bundle", "openshift-config", proxy.Spec.TrustedCA.Name)
+				}
+				trustBundle = append(trustBundle, proxyTrustBundle...)
 			}
-			trustBundle = append(trustBundle, proxyTrustBundle...)
 		}
 	}
 	spec.AdditionalTrustBundle = trustBundle
