@@ -104,15 +104,41 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 		return fmt.Errorf("could not get ControllerConfig: %v", err)
 	}
 
-	klog.Infof("Managing certificates based on current configuration.")
-	if err := dn.manageCertificates(controllerConfig); err != nil {
-		return fmt.Errorf("error managing certificates: %v", err)
-	}
-
 	if dn.node == nil {
 		// Node has not yet initialized, wait to resync
 		dn.enqueueControllerConfigAfter(controllerConfig, ccRequeueDelay)
 		return nil
+	}
+
+	// Retrieve the current state of the certificates
+	oldCloudCA, oldAdditionalTrustBundle := getCurrentCertificateState()
+
+	klog.Infof("Old Cloud CA: %s", oldCloudCA)
+	klog.Infof("Old Additional Trust Bundle: %s", oldAdditionalTrustBundle)
+
+	klog.Infof("Old Cloud CA Length: %d", len(oldCloudCA))
+	klog.Infof("Old Additional Trust Bundle Length: %d", len(oldAdditionalTrustBundle))
+
+	// Compare old and new certificates
+	cloudCA := controllerConfig.Spec.CloudProviderCAData
+	additionalTrustBundle := controllerConfig.Spec.AdditionalTrustBundle
+
+	klog.Infof("New Cloud CA: %s", cloudCA)
+	klog.Infof("New Additional Trust Bundle: %s", additionalTrustBundle)
+
+	klog.Infof("New Cloud CA Length: %d", len(cloudCA))
+	klog.Infof("New Additional Trust Bundle Length: %d", len(additionalTrustBundle))
+
+	manageCloudCA := len(oldCloudCA) != 0 || len(cloudCA) != 0
+	manageAdditionalTrustBundle := len(oldAdditionalTrustBundle) != 0 || len(additionalTrustBundle) != 0
+
+	if !manageCloudCA && !manageAdditionalTrustBundle {
+		klog.Info("Both old and new certificates are empty. Skipping certificate management.")
+	} else {
+		klog.Infof("Managing certificates based on current configuration.")
+		if err := dn.manageCertificates(controllerConfig, manageCloudCA, manageAdditionalTrustBundle); err != nil {
+			return fmt.Errorf("error managing certificates: %v", err)
+		}
 	}
 
 	// Write the latest cert to disk, if the controllerconfig resourceVersion has updated
@@ -390,31 +416,70 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 	return nil
 }
 
-func (dn *Daemon) manageCertificates(controllerConfig *mcfgv1.ControllerConfig) error {
-	// Check for removal of cloudCA certificate in the controllerConfig
-	cloudCA := controllerConfig.Spec.CloudProviderCAData
-	if len(cloudCA) == 0 {
-		klog.Info("controllerConfig: cloud-provider CA data is empty, attempting to remove certificate from node")
-		// Certificate has been removed from the controllerConfig, remove it from the node
-		err := os.Remove("/etc/kubernetes/static-pod-resources/configmaps/cloud-config/ca-bundle.pem")
-		if err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("failed to remove cloud CA certificate from node: %v", err)
-		}
-		klog.Info("Removed cloud CA certificate from node")
+// getCurrentCertificateState retrieves the current state of the certificates
+func getCurrentCertificateState() ([]byte, []byte) {
+	cloudCAPath := "/etc/kubernetes/static-pod-resources/configmaps/cloud-config/ca-bundle.pem"
+	additionalTrustBundlePath := "/etc/pki/ca-trust/source/anchors/openshift-config-user-ca-bundle.crt"
+
+	var cloudCA, additionalTrustBundle []byte
+
+	// Read the cloud CA if it exists
+	if data, err := os.ReadFile(cloudCAPath); err == nil {
+		cloudCA = data
 	}
 
-	// Check for removal of AdditionalTrustBundle in the controllerConfig
-	additionalTrustBundle := controllerConfig.Spec.AdditionalTrustBundle
-	if len(additionalTrustBundle) == 0 {
-		klog.Info("controllerConfig: additional trust bundle is empty, attempting to remove certificate from node")
-		// Certificate has been removed from the controllerConfig, remove it from the node
-		err := os.Remove("/etc/pki/ca-trust/source/anchors/openshift-config-user-ca-bundle.crt")
-		if err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("failed to remove additional trust bundle from node: %v", err)
-		}
-		klog.Info("Removed additional trust bundle from node")
+	// Read the additional trust bundle if it exists
+	if data, err := os.ReadFile(additionalTrustBundlePath); err == nil {
+		additionalTrustBundle = data
 	}
 
+	return cloudCA, additionalTrustBundle
+}
+
+func (dn *Daemon) manageCertificates(controllerConfig *mcfgv1.ControllerConfig, manageCloudCA, manageAdditionalTrustBundle bool) error {
+	// Paths to the certificates
+	cloudCAPath := "/etc/kubernetes/static-pod-resources/configmaps/cloud-config/ca-bundle.pem"
+	additionalTrustBundlePath := "/etc/pki/ca-trust/source/anchors/openshift-config-user-ca-bundle.crt"
+
+	// Handle CloudProviderCAData if specified
+	if manageCloudCA {
+		cloudCA := controllerConfig.Spec.CloudProviderCAData
+		if len(cloudCA) == 0 {
+			klog.Info("controllerConfig: cloud-provider CA data is empty, removing certificate from node")
+			if err := removeCertIfExists(cloudCAPath); err != nil {
+				return fmt.Errorf("failed to remove cloud CA certificate from node: %v", err)
+			}
+		}
+	}
+
+	// Handle AdditionalTrustBundle if specified
+	if manageAdditionalTrustBundle {
+		additionalTrustBundle := controllerConfig.Spec.AdditionalTrustBundle
+		if len(additionalTrustBundle) == 0 {
+			klog.Info("controllerConfig: additional trust bundle is empty, removing certificate from node")
+			if err := removeCertIfExists(additionalTrustBundlePath); err != nil {
+				return fmt.Errorf("failed to remove additional trust bundle from node: %v", err)
+			}
+		}
+	}
+
+	klog.Info("Manage Certs now completed")
+	return nil
+}
+
+// removeCertIfExists attempts to remove a file if it exists
+func removeCertIfExists(filePath string) error {
+	if _, err := os.Open(filePath); err == nil {
+		// cert exists, attempt to remove it
+		klog.Info("cert exists, attempting to remove it")
+		if err := os.Remove(filePath); err != nil {
+			return err
+		}
+		klog.Infof("removed file: %s", filePath)
+	} else if !os.IsNotExist(err) {
+		// An error other than "file does not exist" occurred
+		return fmt.Errorf("error checking file existence: %v", err)
+	}
 	return nil
 }
 
