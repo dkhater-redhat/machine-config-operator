@@ -234,9 +234,6 @@ func (optr *Operator) syncCloudConfig(spec *mcfgv1.ControllerConfigSpec, infra *
 				return fmt.Errorf("%s/%s configmap is required on platform %s but not found: %w",
 					"openshift-config-managed", "kube-cloud-config", infra.Status.PlatformStatus.Type, err)
 			}
-			// Clear CA data and CloudProviderConfig if the ConfigMap is not found
-			spec.CloudProviderCAData = nil
-			spec.CloudProviderConfig = ""
 			return nil
 		}
 		return err
@@ -296,61 +293,38 @@ func (optr *Operator) syncRenderConfig(_ *renderConfig) error {
 		return err
 	}
 	imgRegistryUsrData := []mcfgv1.ImageRegistryBundle{}
+
+	klog.Infof("configmap is %s", cfg.Spec.AdditionalTrustedCA.Name)
+
+	//remove this if statement and rework this
 	if cfg.Spec.AdditionalTrustedCA.Name != "" {
 		cm, err := optr.clusterCmLister.ConfigMaps("openshift-config").Get(cfg.Spec.AdditionalTrustedCA.Name)
 		if err != nil {
 			klog.Warningf("could not find configmap specified in image.config.openshift.io/cluster with the name %s", cfg.Spec.AdditionalTrustedCA.Name)
 		} else {
-			newKeys := sets.StringKeySet(cm.Data).List()
-			newBinaryKeys := sets.StringKeySet(cm.BinaryData).List()
-			for _, key := range newKeys {
-				raw, err := base64.StdEncoding.DecodeString(cm.Data[key])
-				if err != nil {
-					imgRegistryUsrData = append(imgRegistryUsrData, mcfgv1.ImageRegistryBundle{
-						File: key,
-						Data: []byte(cm.Data[key]),
-					})
-				} else {
-					imgRegistryUsrData = append(imgRegistryUsrData, mcfgv1.ImageRegistryBundle{
-						File: key,
-						Data: raw,
-					})
-				}
+			klog.Infof("AdditionalTrustedCA is populated, processing configmap for certs")
+			imgRegistryUsrData = processConfigMapForCerts(cm)
+
+			klog.Infof("AdditionalTrustedCA is populated, syncing certs")
+			updatedCerts, removedCerts, err := syncConfigMapCerts(cm, imgRegistryUsrData)
+			if err != nil {
+				return fmt.Errorf("error syncing config map certs: %v", err)
 			}
-			for _, key := range newBinaryKeys {
-				imgRegistryUsrData = append(imgRegistryUsrData, mcfgv1.ImageRegistryBundle{
-					File: key,
-					Data: cm.BinaryData[key],
-				})
+
+			// Log removed certificates for debugging purposes or handle accordingly
+			if len(removedCerts) > 0 {
+				klog.Infof("Removed certificates: %v", removedCerts)
 			}
+
+			// Use the updated certificates; this replaces the old data completely
+			imgRegistryUsrData = updatedCerts
 		}
 	}
 
 	imgRegistryData := []mcfgv1.ImageRegistryBundle{}
 	cm, err := optr.clusterCmLister.ConfigMaps("openshift-config-managed").Get("image-registry-ca")
 	if err == nil {
-		newKeys := sets.StringKeySet(cm.Data).List()
-		newBinaryKeys := sets.StringKeySet(cm.BinaryData).List()
-		for _, key := range newKeys {
-			raw, err := base64.StdEncoding.DecodeString(cm.Data[key])
-			if err != nil {
-				imgRegistryData = append(imgRegistryData, mcfgv1.ImageRegistryBundle{
-					File: key,
-					Data: []byte(cm.Data[key]),
-				})
-			} else {
-				imgRegistryData = append(imgRegistryData, mcfgv1.ImageRegistryBundle{
-					File: key,
-					Data: raw,
-				})
-			}
-		}
-		for _, key := range newBinaryKeys {
-			imgRegistryData = append(imgRegistryData, mcfgv1.ImageRegistryBundle{
-				File: key,
-				Data: cm.BinaryData[key],
-			})
-		}
+		imgRegistryData = processConfigMapForCerts(cm)
 	}
 
 	mergedData := append(imgRegistryData, imgRegistryUsrData...)
@@ -382,61 +356,8 @@ func (optr *Operator) syncRenderConfig(_ *renderConfig) error {
 			return err
 		}
 	} else {
-		cmMarshal, err := json.Marshal(cm)
-		if err != nil {
+		if err := optr.updateMergedCAConfigMap(cm, caData, cmAnnotations); err != nil {
 			return err
-		}
-		newCM := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        "merged-trusted-image-registry-ca",
-				Annotations: cmAnnotations,
-			},
-			Data: caData,
-		}
-		newCMMarshal, err := json.Marshal(newCM)
-		if err != nil {
-			return err
-		}
-
-		// check for deletedData
-		stillExists := false
-		for file, data := range cm.Data {
-			stillExists = false
-			// for each file in the configmap
-			// does it match ANY of the new files? if not, it is deleted.
-			for newfile, newdata := range caData {
-				if newfile == file && newdata == data {
-					stillExists = true
-				}
-			}
-			if !stillExists {
-				break
-			}
-		}
-		// check for newData
-		for file, data := range caData {
-			equal := false
-			for oldfile, olddata := range cm.Data {
-				if file == oldfile && data == olddata {
-					equal = true
-				}
-			}
-			if !equal || (!stillExists && len(cm.Data) > 0) {
-				klog.Info("Detecting changes in merged-trusted-image-registry-ca, creating patch")
-				if !equal {
-					klog.Infof("Diff is between file %s and its data %s which are new", file, data)
-				}
-				patchBytes, err := jsonmergepatch.CreateThreeWayJSONMergePatch(cmMarshal, newCMMarshal, cmMarshal)
-				klog.Infof("JSONPATCH: \n  %s", string(patchBytes))
-				if err != nil {
-					return err
-				}
-				_, err = optr.kubeClient.CoreV1().ConfigMaps("openshift-config-managed").Patch(context.TODO(), "merged-trusted-image-registry-ca", types.MergePatchType, patchBytes, metav1.PatchOptions{})
-				if err != nil {
-					return fmt.Errorf("could not patch merged-trusted-image-registry-ca with data %s: %w", string(patchBytes), err)
-				}
-				break
-			}
 		}
 	}
 
@@ -446,17 +367,9 @@ func (optr *Operator) syncRenderConfig(_ *renderConfig) error {
 		return err
 	}
 
-	bootstrapComplete := false
-	_, err = optr.clusterCmLister.ConfigMaps("kube-system").Get("bootstrap")
-	switch {
-	case err == nil:
-		bootstrapComplete = true
-	case apierrors.IsNotFound(err):
-		bootstrapComplete = false
-	case err != nil:
+	bootstrapComplete, err := optr.checkBootstrapCompletion()
+	if err != nil {
 		return err
-	default:
-		panic("math broke")
 	}
 
 	var kubeAPIServerServingCABytes []byte
@@ -548,13 +461,14 @@ func (optr *Operator) syncRenderConfig(_ *renderConfig) error {
 	// this is the trusted bundle specific for proxy things and can differ from the generic one above.
 	if proxy != nil && proxy.Spec.TrustedCA.Name != "" && proxy.Spec.TrustedCA.Name != "user-ca-bundle" {
 		proxyTrustBundle, err := optr.getCAsFromConfigMap("openshift-config", proxy.Spec.TrustedCA.Name, "ca-bundle.crt")
-		if err == nil {
-			if len(proxyTrustBundle) > 0 {
-				if !certPool.AppendCertsFromPEM(proxyTrustBundle) {
-					return fmt.Errorf("configmap %s/%s doesn't have a valid PEM bundle", "openshift-config", proxy.Spec.TrustedCA.Name)
-				}
-				trustBundle = append(trustBundle, proxyTrustBundle...)
+		if err != nil {
+			return err
+		}
+		if len(proxyTrustBundle) > 0 {
+			if !certPool.AppendCertsFromPEM(proxyTrustBundle) {
+				return fmt.Errorf("configmap %s/%s doesn't have a valid PEM bundle", "openshift-config", proxy.Spec.TrustedCA.Name)
 			}
+			trustBundle = append(trustBundle, proxyTrustBundle...)
 		}
 	}
 	spec.AdditionalTrustBundle = trustBundle
@@ -598,7 +512,169 @@ func (optr *Operator) syncRenderConfig(_ *renderConfig) error {
 
 	// create renderConfig
 	optr.renderConfig = getRenderConfig(optr.namespace, string(kubeAPIServerServingCABytes), spec, &imgs.RenderConfigImages, infra.Status.APIServerInternalURL, pointerConfigData)
+	klog.Infof("Current renderConfig: %+v", optr.renderConfig)
 	return nil
+}
+
+func processConfigMapForCerts(cm *corev1.ConfigMap) []mcfgv1.ImageRegistryBundle {
+	var imgRegistryData []mcfgv1.ImageRegistryBundle
+	newKeys := sets.StringKeySet(cm.Data).List()
+	newBinaryKeys := sets.StringKeySet(cm.BinaryData).List()
+	for _, key := range newKeys {
+		raw, err := base64.StdEncoding.DecodeString(cm.Data[key])
+		if err != nil {
+			imgRegistryData = append(imgRegistryData, mcfgv1.ImageRegistryBundle{
+				File: key,
+				Data: []byte(cm.Data[key]),
+			})
+		} else {
+			imgRegistryData = append(imgRegistryData, mcfgv1.ImageRegistryBundle{
+				File: key,
+				Data: raw,
+			})
+		}
+	}
+	for _, key := range newBinaryKeys {
+		imgRegistryData = append(imgRegistryData, mcfgv1.ImageRegistryBundle{
+			File: key,
+			Data: cm.BinaryData[key],
+		})
+	}
+	return imgRegistryData
+}
+
+func syncConfigMapCerts(cm *corev1.ConfigMap, existingCerts []mcfgv1.ImageRegistryBundle) ([]mcfgv1.ImageRegistryBundle, []string, error) {
+	updatedCerts := make([]mcfgv1.ImageRegistryBundle, 0)
+	removedCerts := make([]string, 0)
+	currentCerts := make(map[string][]byte)
+
+	klog.Infof("Loading current certs for comparison...")
+	for _, cert := range existingCerts {
+		currentCerts[cert.File] = cert.Data
+		klog.Infof("Loaded cert from existing certs: %s, data length: %d", cert.File, len(cert.Data))
+	}
+
+	// Convert ConfigMap data and binary data into a single map for easier processing
+	combinedData := make(map[string][]byte)
+	klog.Infof("Preparing combined data map from ConfigMap...")
+	for key, value := range cm.Data {
+		decodedData, err := base64.StdEncoding.DecodeString(value)
+		if err != nil {
+			klog.Infof("Using raw data for key %s due to base64 decode error: %v", key, err)
+			decodedData = []byte(value)
+		}
+		combinedData[key] = decodedData
+		klog.Infof("Loaded data for key %s, data length: %d", key, len(decodedData))
+	}
+
+	for key, value := range cm.BinaryData {
+		combinedData[key] = value
+		klog.Infof("Loaded binary data for key %s, data length: %d", key, len(value))
+	}
+
+	klog.Infof("Checking for new, updated, or removed certs...")
+	// Check for new or updated certs
+	for key, data := range combinedData {
+		if oldData, exists := currentCerts[key]; !exists || !bytes.Equal(oldData, data) {
+			updatedCerts = append(updatedCerts, mcfgv1.ImageRegistryBundle{File: key, Data: data})
+			currentCerts[key] = data // Update current certs map
+			klog.Infof("Updated or new cert detected for key %s with data: %s", key, string(data))
+		}
+	}
+
+	klog.Infof("Current certs map: %+v", currentCerts)
+	klog.Infof("Combined data map from config map: %+v", combinedData)
+
+	klog.Infof("Checking for removed certs")
+	// Check for removed certs
+	for key := range currentCerts {
+		if _, exists := combinedData[key]; !exists {
+			removedCerts = append(removedCerts, key)
+			delete(currentCerts, key) // Remove from current certs map
+			klog.Infof("Removed cert detected for key %s", key)
+		}
+	}
+
+	// Log the lists of updated and removed certificates
+	if len(updatedCerts) > 0 {
+		klog.Infof("Updated certificates: %+v", updatedCerts)
+	}
+	if len(removedCerts) > 0 {
+		klog.Infof("Removed certificates: %+v", removedCerts)
+	}
+
+	// Return the directly updated existingCerts slice, which now includes additions and excludes deletions
+	return updatedCerts, removedCerts, nil
+}
+
+func (optr *Operator) updateMergedCAConfigMap(cm *corev1.ConfigMap, caData map[string]string, annotations map[string]string) error {
+	cmMarshal, err := json.Marshal(cm)
+	if err != nil {
+		return err
+	}
+	newCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "merged-trusted-image-registry-ca",
+			Annotations: annotations,
+		},
+		Data: caData,
+	}
+	newCMMarshal, err := json.Marshal(newCM)
+	if err != nil {
+		return err
+	}
+
+	stillExists := false
+	for file, data := range cm.Data {
+		stillExists = false
+		for newfile, newdata := range caData {
+			if newfile == file && newdata == data {
+				stillExists = true
+			}
+		}
+		if !stillExists {
+			break
+		}
+	}
+	for file, data := range caData {
+		equal := false
+		for oldfile, olddata := range cm.Data {
+			if file == oldfile && data == olddata {
+				equal = true
+			}
+		}
+		if !equal || (!stillExists && len(cm.Data) > 0) {
+			klog.Info("Detecting changes in merged-trusted-image-registry-ca, creating patch")
+			if !equal {
+				klog.Infof("Diff is between file %s and its data %s which are new dalia was here3", file, data)
+			}
+			patchBytes, err := jsonmergepatch.CreateThreeWayJSONMergePatch(cmMarshal, newCMMarshal, cmMarshal)
+			klog.Infof("JSONPATCH: \n  %s", string(patchBytes))
+			if err != nil {
+				return err
+			}
+			_, err = optr.kubeClient.CoreV1().ConfigMaps("openshift-config-managed").Patch(context.TODO(), "merged-trusted-image-registry-ca", types.MergePatchType, patchBytes, metav1.PatchOptions{})
+			if err != nil {
+				return fmt.Errorf("could not patch merged-trusted-image-registry-ca with data %s: %w", string(patchBytes), err)
+			}
+			break
+		}
+	}
+	return nil
+}
+
+func (optr *Operator) checkBootstrapCompletion() (bool, error) {
+	_, err := optr.clusterCmLister.ConfigMaps("kube-system").Get("bootstrap")
+	switch {
+	case err == nil:
+		return true, nil
+	case apierrors.IsNotFound(err):
+		return false, nil
+	case err != nil:
+		return false, err
+	default:
+		panic("math broke")
+	}
 }
 
 func getIgnitionHost(infraStatus *configv1.InfrastructureStatus) (string, error) {
@@ -952,7 +1028,7 @@ func (optr *Operator) safetySyncControllerConfig(config *renderConfig) error {
 	// we can't render a new one here, it won't succeed because the existing controller won't touch it
 	// and we'll time out waiting.
 	if existingCc.Annotations[daemonconsts.GeneratedByVersionAnnotationKey] != version.Raw {
-		return fmt.Errorf("Our version (%s) differs from controllerconfig (%s), can't do 'safety' controllerconfig sync until controller is updated", version.Raw, existingCc.Annotations[daemonconsts.GeneratedByVersionAnnotationKey])
+		return fmt.Errorf("our version (%s) differs from controllerconfig (%s), can't do 'safety' controllerconfig sync until controller is updated", version.Raw, existingCc.Annotations[daemonconsts.GeneratedByVersionAnnotationKey])
 	}
 
 	// If we made it here, we should be able to sync controllerconfig, and the existing controller should handle it
