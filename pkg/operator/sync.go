@@ -226,37 +226,53 @@ func isCloudConfRequired(infra *configv1.Infrastructure) bool {
 
 // Sync cloud config on supported platform from cloud.conf available in openshift-config-managed/kube-cloud-config ConfigMap.
 func (optr *Operator) syncCloudConfig(spec *mcfgv1.ControllerConfigSpec, infra *configv1.Infrastructure) error {
-	cm, err := optr.clusterCmLister.ConfigMaps("openshift-config-managed").Get("kube-cloud-config")
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			if isKubeCloudConfigCMRequired(infra) {
-				// Return error only if the kube-cloud-config ConfigMap is required, otherwise proceeds further.
-				return fmt.Errorf("%s/%s configmap is required on platform %s but not found: %w",
-					"openshift-config-managed", "kube-cloud-config", infra.Status.PlatformStatus.Type, err)
-			}
-			return nil
-		}
-		return err
-	}
-	// Read cloud.conf from openshift-config-managed/kube-cloud-config ConfigMap.
-	cc, err := getCloudConfigFromConfigMap(cm, "cloud.conf")
-	if err != nil {
-		if isCloudConfRequired(infra) {
-			// Return error only if cloud.conf is required, otherwise proceeds further.
-			return fmt.Errorf("%s/%s configmap must have the %s key on platform %s but not found",
-				"openshift-config-managed", "kube-cloud-config", "cloud.conf", infra.Status.PlatformStatus.Type)
-		}
+	klog.Infof("Starting to sync cloud configuration...")
+	klog.Infof("ControllerConfigSpec: %+v", spec)
+
+	klog.Infof("Applying ControllerConfigSpec with CloudProviderCAData length: %d", len(spec.CloudProviderCAData))
+	if len(spec.CloudProviderCAData) == 0 {
+		klog.Infof("CloudProviderCAData is empty, confirming clearing operation")
 	} else {
-		spec.CloudProviderConfig = cc
+		klog.Infof("CloudProviderCAData is present, successfully applied from trusted CA")
 	}
 
-	// Handle the removal of CA data
-	caCert, err := getCAsFromConfigMap(cm, "ca-bundle.pem")
-	if err == nil {
-		spec.CloudProviderCAData = caCert
-	} else {
-		spec.CloudProviderCAData = nil
+	// Check the Proxy resource for CA updates
+	proxy, err := optr.proxyLister.Get("cluster")
+	if err != nil {
+		klog.Errorf("Failed to get Proxy resource: %v", err)
+		return err
 	}
+
+	if proxy != nil && proxy.Spec.TrustedCA.Name != "" {
+		klog.Infof("Processing trusted CA from Proxy: %s", proxy.Spec.TrustedCA.Name)
+		caCM, err := optr.clusterCmLister.ConfigMaps("openshift-config").Get(proxy.Spec.TrustedCA.Name)
+		if err != nil {
+			klog.Errorf("Failed to get ConfigMap for trusted CA %s: %v", proxy.Spec.TrustedCA.Name, err)
+			return err
+		}
+		caCert, err := getCAsFromConfigMap(caCM, "ca-bundle.crt")
+		if err != nil {
+			klog.Errorf("Failed to extract CA certificate from ConfigMap %s: %v", proxy.Spec.TrustedCA.Name, err)
+			return err
+		}
+		spec.CloudProviderCAData = caCert
+		klog.Infof("cloud provider ca data is %s", spec.CloudProviderCAData)
+		klog.Infof("Trusted CA updated from %s.", proxy.Spec.TrustedCA.Name)
+	} else {
+		klog.Infof("No TrustedCA specified or found; clearing CloudProviderCAData.")
+		klog.Infof("cloud provider ca data is %s", spec.CloudProviderCAData)
+		spec.CloudProviderCAData = nil
+		klog.Infof("cloud provider ca data after clearing is %s", spec.CloudProviderCAData)
+	}
+
+	if len(spec.CloudProviderCAData) == 0 {
+		klog.Infof("CloudProviderCAData is empty")
+	} else {
+		klog.Infof("CloudProviderCAData is present")
+	}
+
+	klog.Infof("Completed syncing cloud config.")
+	// klog.Infof("ControllerConfigSpec after completing cloud config sync: %+v", spec)
 	return nil
 }
 
@@ -443,6 +459,7 @@ func (optr *Operator) syncRenderConfig(_ *renderConfig) error {
 	if err != nil {
 		return err
 	}
+	klog.Infof("Received spec for syncing in sync loop before: %+v", spec)
 
 	var trustBundle []byte
 	certPool := x509.NewCertPool()
@@ -472,6 +489,9 @@ func (optr *Operator) syncRenderConfig(_ *renderConfig) error {
 		}
 	}
 	spec.AdditionalTrustBundle = trustBundle
+
+	klog.Infof("running sync cloud config")
+	klog.Infof("Received spec for syncing in sync loop after: %+v", spec)
 
 	if err := optr.syncCloudConfig(spec, infra); err != nil {
 		return err
@@ -512,7 +532,6 @@ func (optr *Operator) syncRenderConfig(_ *renderConfig) error {
 
 	// create renderConfig
 	optr.renderConfig = getRenderConfig(optr.namespace, string(kubeAPIServerServingCABytes), spec, &imgs.RenderConfigImages, infra.Status.APIServerInternalURL, pointerConfigData)
-	klog.Infof("Current renderConfig: %+v", optr.renderConfig)
 	return nil
 }
 
@@ -646,7 +665,7 @@ func (optr *Operator) updateMergedCAConfigMap(cm *corev1.ConfigMap, caData map[s
 		if !equal || (!stillExists && len(cm.Data) > 0) {
 			klog.Info("Detecting changes in merged-trusted-image-registry-ca, creating patch")
 			if !equal {
-				klog.Infof("Diff is between file %s and its data %s which are new dalia was here3", file, data)
+				klog.Infof("Diff is between file %s and its data %s which are new dalia was here4", file, data)
 			}
 			patchBytes, err := jsonmergepatch.CreateThreeWayJSONMergePatch(cmMarshal, newCMMarshal, cmMarshal)
 			klog.Infof("JSONPATCH: \n  %s", string(patchBytes))
@@ -1042,6 +1061,9 @@ func (optr *Operator) safetySyncControllerConfig(config *renderConfig) error {
 //
 //nolint:gocritic
 func (optr *Operator) syncControllerConfig(config *renderConfig) error {
+
+	klog.Infof("Starting sync of ControllerConfig...")
+
 	ccBytes, err := renderAsset(config, "manifests/machineconfigcontroller/controllerconfig.yaml")
 	if err != nil {
 		return err
@@ -1051,6 +1073,19 @@ func (optr *Operator) syncControllerConfig(config *renderConfig) error {
 	// suppress rendered config generation until a corresponding
 	// new controller can roll out too.
 	// https://bugzilla.redhat.com/show_bug.cgi?id=1879099
+
+	klog.Infof("Current AdditionalTrustBundle length: %d", len(cc.Spec.AdditionalTrustBundle))
+	klog.Infof("Current CloudProviderCAData length: %d", len(cc.Spec.CloudProviderCAData))
+
+	if len(cc.Spec.AdditionalTrustBundle) > 0 {
+		klog.Infof("No AdditionalTrustBundle provided but existing data found, clearing...")
+		// cc.Spec.AdditionalTrustBundle = nil
+	}
+
+	if len(cc.Spec.CloudProviderCAData) > 0 {
+		klog.Infof("No CloudProviderCAData provided but existing data found, clearing...")
+		// cc.Spec.CloudProviderCAData = nil
+	}
 
 	editCCAnno := false
 	kubeConfigData, err := optr.clusterCmLister.ConfigMaps("openshift-config-managed").Get("kube-apiserver-server-ca")
@@ -1155,10 +1190,20 @@ func (optr *Operator) syncControllerConfig(config *renderConfig) error {
 	optrVersion, _ := optr.vStore.Get("operator")
 	cc.Annotations[ctrlcommon.ReleaseImageVersionAnnotationKey] = optrVersion
 
+	// klog.Infof("Applying ControllerConfig with details: %+v", cc)
+	klog.Infof("Current AdditionalTrustBundle length before applying cc: %d", len(cc.Spec.AdditionalTrustBundle))
+	klog.Infof("Current CloudProviderCAData length before applying cc: %d", len(cc.Spec.CloudProviderCAData))
+
 	_, _, err = mcoResourceApply.ApplyControllerConfig(optr.client.MachineconfigurationV1(), cc)
 	if err != nil {
 		return err
 	}
+
+	klog.Infof("Current AdditionalTrustBundle length after applying cc: %d", len(cc.Spec.AdditionalTrustBundle))
+	klog.Infof("Current CloudProviderCAData length after applying cc: %d", len(cc.Spec.CloudProviderCAData))
+
+	klog.Info("Successfully applied ControllerConfig")
+
 	return optr.waitForControllerConfigToBeCompleted(cc)
 }
 

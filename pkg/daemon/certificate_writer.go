@@ -129,6 +129,9 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 	klog.Infof("New Cloud CA Length: %d", len(cloudCA))
 	klog.Infof("New Additional Trust Bundle Length: %d", len(additionalTrustBundle))
 
+	//user ca == additional trust bundle doesnt need to be manipulated in the certificate writer
+	//cloud ca == is cloud provider ca data
+
 	manageCloudCA := len(oldCloudCA) != 0 || len(cloudCA) != 0
 	manageAdditionalTrustBundle := len(oldAdditionalTrustBundle) != 0 || len(additionalTrustBundle) != 0
 

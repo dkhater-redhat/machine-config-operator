@@ -5,7 +5,7 @@ import (
 )
 
 func setBytesIfSet(modified *bool, existing *[]byte, required []byte) {
-	if len(required) == 0 {
+	if len(required) == 0 && len(*existing) == 0 {
 		return
 	}
 	if string(required) != string(*existing) {

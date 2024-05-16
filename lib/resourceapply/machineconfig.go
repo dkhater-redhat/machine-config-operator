@@ -13,6 +13,7 @@ import (
 	mcoResourceMerge "github.com/openshift/machine-config-operator/lib/resourcemerge"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
 )
 
 // ApplyMachineConfig applies the required machineconfig to the cluster.
@@ -80,21 +81,39 @@ func ApplyMachineConfigNode(client mcfgclientalphav1.MachineConfigNodesGetter, r
 
 // ApplyControllerConfig applies the required machineconfig to the cluster.
 func ApplyControllerConfig(client mcfgclientv1.ControllerConfigsGetter, required *mcfgv1.ControllerConfig) (*mcfgv1.ControllerConfig, bool, error) {
+	klog.Info("Getting existing ControllerConfig with name: ", required.GetName())
 	existing, err := client.ControllerConfigs().Get(context.TODO(), required.GetName(), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		klog.Infof("ControllerConfig not found, creating new one")
 		actual, err := client.ControllerConfigs().Create(context.TODO(), required, metav1.CreateOptions{})
+		if err != nil {
+			klog.Errorf("Failed to create ControllerConfig: %v", err)
+		} else {
+			klog.Infof("Created ControllerConfig: %+v", actual)
+		}
 		return actual, true, err
 	}
 	if err != nil {
+		klog.Errorf("Error fetching ControllerConfig: %v", err)
 		return nil, false, err
 	}
 
 	modified := resourcemerge.BoolPtr(false)
+	klog.Infof("Checking if existing ControllerConfig needs to be updated")
 	mcoResourceMerge.EnsureControllerConfig(modified, existing, *required)
+	klog.Infof("Modification needed: %t", *modified)
 	if !*modified {
+		klog.Info("No updates required for the ControllerConfig")
+		klog.Infof("Existing ControllerConfig: %+v", existing)
 		return existing, false, nil
 	}
 
+	klog.Infof("Updating existing ControllerConfig")
 	actual, err := client.ControllerConfigs().Update(context.TODO(), existing, metav1.UpdateOptions{})
+	if err != nil {
+		klog.Errorf("Failed to update ControllerConfig: %v", err)
+	} else {
+		klog.Infof("Updated ControllerConfig: %+v", actual)
+	}
 	return actual, true, err
 }
