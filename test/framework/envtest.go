@@ -8,9 +8,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -27,14 +30,33 @@ import (
 
 const (
 	OpenshiftConfigNamespace string = "openshift-config"
-	//
-	// Although the MCO has been bumped to 1.29.2, openshift-kubebuilder-tools
-	// does not have an archive for that kube version yet. For now, hardcode to match it.
-	// More info here:
-	// https://github.com/openshift/api/pull/1774
-	// https://github.com/openshift/api/blob/master/tools/publish-kubebuilder-tools/README.md#using-the-archives
-	k8sVersion string = "1.29.1"
+	K8sVersion               string = "v1.29.5"
 )
+
+// getK8sVersion retrieves the Kubernetes version from the API server.
+func GetK8sVersion() (string, error) {
+	kubeconfig := os.Getenv("KUBECONFIG")
+	if kubeconfig == "" {
+		return K8sVersion, nil
+	}
+
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		return "", fmt.Errorf("failed to build config from kubeconfig: %w", err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return "", fmt.Errorf("failed to create clientset: %w", err)
+	}
+
+	versionInfo, err := clientset.ServerVersion()
+	if err != nil {
+		return "", fmt.Errorf("failed to get server version: %w", err)
+	}
+
+	return versionInfo.GitVersion, nil
+}
 
 // This is needed because both setup-envtest and the kubebuilder tools assume
 // that HOME is set to a writable value. While running locally, this is
@@ -89,6 +111,7 @@ func setupEnvTest(t *testing.T) (string, error) {
 	// More info:
 	// https://github.com/openshift/api/pull/1774,
 	// https://github.com/openshift/api/blob/master/tools/publish-kubebuilder-tools/README.md#using-the-archives
+	k8sVersion := strings.TrimPrefix(K8sVersion, "v")
 	cmd := exec.Command(setupEnvTestBinPath, "use", k8sVersion, "-p", "path", "--remote-bucket", "openshift-kubebuilder-tools")
 	t.Log("Setting up EnvTest: $", cmd)
 

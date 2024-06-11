@@ -695,3 +695,21 @@ func containsGVK(objs []runtime.Object, gvk schema.GroupVersionKind) bool {
 	}
 	return false
 }
+
+// TestGetK8sVersion tests the getK8sVersion function.
+func TestGetK8sVersion(t *testing.T) {
+	// Call the function under test
+	version, err := framework.GetK8sVersion()
+	require.NoError(t, err)
+	t.Logf("Kubernetes version: %s", version)
+
+	// Normalize the version string for comparison
+	expectedVersion := strings.Split(framework.K8sVersion, "+")[0]
+	actualVersion := strings.Split(version, "+")[0]
+
+	// Assert that the version matches the exported K8sVersion constant
+	assert.Equal(t, expectedVersion, actualVersion, "Expected Kubernetes version to match the constant")
+
+	// Add an assertion to check the version format (optional)
+	require.Regexp(t, `^v\d+\.\d+\.\d+.*`, version, "Expected Kubernetes version to match pattern vX.X.X")
+}
