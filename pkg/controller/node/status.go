@@ -99,6 +99,8 @@ func (ctrl *Controller) calculateStatus(fg featuregates.FeatureGate, mcs []*mcfg
 		}
 	}
 	machineCount := int32(len(nodes))
+	klog.Infof("Calculating status for pool %s with %d nodes", pool.Name, machineCount)
+
 	poolSynchronizer := newPoolSynchronizer(machineCount)
 
 	l, _ := ctrl.IsLayeredPool(mosc, mosb)
@@ -196,6 +198,8 @@ func (ctrl *Controller) calculateStatus(fg featuregates.FeatureGate, mcs []*mcfg
 		degradedMachineCount = int32(len(degradedMachines))
 	}
 
+	klog.Infof("Status for pool %s - Degraded: %d, Updated: %d, Unavailable: %d, Updating: %d, Ready: %d", pool.Name, degradedMachineCount, updatedMachineCount, unavailableMachineCount, updatingMachineCount, readyMachineCount)
+
 	for _, n := range degradedMachines {
 		reason, ok := n.Annotations[daemonconsts.MachineConfigDaemonReasonAnnotationKey]
 		if ok && reason != "" {
@@ -240,6 +244,7 @@ func (ctrl *Controller) calculateStatus(fg featuregates.FeatureGate, mcs []*mcfg
 	if allUpdated {
 		//TODO: update api to only have one condition regarding status of update.
 		updatedMsg := fmt.Sprintf("All nodes are updated with %s", getPoolUpdateLine(pool, mosc, l))
+		klog.Infof("Pool %s: %s", pool.Name, updatedMsg)
 		supdated := apihelpers.NewMachineConfigPoolCondition(mcfgv1.MachineConfigPoolUpdated, corev1.ConditionTrue, "", updatedMsg)
 		apihelpers.SetMachineConfigPoolCondition(&status, *supdated)
 

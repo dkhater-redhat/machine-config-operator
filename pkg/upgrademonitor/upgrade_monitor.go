@@ -88,6 +88,8 @@ func generateAndApplyMachineConfigNodes(
 	imageSetSpec []mcfgalphav1.MachineConfigNodeSpecPinnedImageSet,
 	fgAccessor featuregates.FeatureGateAccess,
 ) error {
+	klog.Infof("Starting generateAndApplyMachineConfigNodes for node: %s", node.Name)
+
 	if fgAccessor == nil || node == nil || parentCondition == nil || mcfgClient == nil {
 		return nil
 	}
@@ -97,20 +99,26 @@ func generateAndApplyMachineConfigNodes(
 		return err
 	}
 	if fg == nil || !fg.Enabled(features.FeatureGateMachineConfigNodes) {
+		klog.Infof("MCN Featuregate is not enabled. Please enable the TechPreviewNoUpgrade featureset to use MachineConfigNodes")
 		return nil
 	}
 
 	var pool string
-	var ok bool
-	if _, ok = node.Labels["node-role.kubernetes.io/worker"]; ok {
+	if _, ok := node.Labels["node-role.kubernetes.io/worker"]; ok {
 		pool = "worker"
-	} else if _, ok = node.Labels["node-role.kubernetes.io/master"]; ok {
+	} else if _, ok := node.Labels["node-role.kubernetes.io/master"]; ok {
 		pool = "master"
+	} else {
+		klog.Errorf("Node %s does not have a valid role label. Expected labels: 'node-role.kubernetes.io/worker' or 'node-role.kubernetes.io/master'", node.Name)
+		return fmt.Errorf("node %s does not have a valid role label", node.Name)
 	}
+	klog.Infof("Assigned pool for node %s: %s", node.Name, pool)
 
 	// get the existing MCN, or if it DNE create one below
 	mcNode, needNewMCNode := createOrGetMachineConfigNode(mcfgClient, node)
 	newMCNode := mcNode.DeepCopy()
+	klog.Infof("Retrieved MCN for node %s: %v, needNewMCNode: %v", node.Name, mcNode.Name, needNewMCNode)
+
 	newParentCondition := metav1.Condition{
 		Type:               string(parentCondition.State),
 		Status:             parentStatus,
@@ -129,6 +137,7 @@ func generateAndApplyMachineConfigNodes(
 		}
 
 	}
+	klog.Infof("Processing conditions for node %s", node.Name)
 	reset := false
 	if newParentCondition.Type == string(mcfgalphav1.MachineConfigNodeUpdated) {
 		reset = true

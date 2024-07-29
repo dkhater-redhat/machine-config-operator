@@ -764,7 +764,11 @@ func (optr *Operator) syncMachineConfigNodes(_ *renderConfig, _ *configv1.Cluste
 			pool = "worker"
 		} else if _, ok = node.Labels["node-role.kubernetes.io/master"]; ok {
 			pool = "master"
+		} else {
+			klog.Errorf("Node %s does not have a valid role label. Expected labels: 'node-role.kubernetes.io/worker' or 'node-role.kubernetes.io/master'", node.Name)
+			continue
 		}
+		klog.Infof("Assigned pool for node %s: %s", node.Name, pool)
 		newMCS := &v1alpha1.MachineConfigNode{
 			Spec: v1alpha1.MachineConfigNodeSpec{
 				Node: v1alpha1.MCOObjectReference{
