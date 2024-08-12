@@ -273,6 +273,7 @@ func (ctrl *Controller) Run(parentCtx context.Context, workers int) {
 	if !cache.WaitForCacheSync(ctx.Done(), ctrl.mcpListerSynced, ctrl.ccListerSynced) {
 		return
 	}
+	ctrl.monitorBuildPods()
 
 	go ctrl.imageBuilder.Run(ctx, workers)
 
@@ -286,7 +287,7 @@ func (ctrl *Controller) Run(parentCtx context.Context, workers int) {
 func (ctrl *Controller) enqueueMachineOSConfig(mosc *mcfgv1alpha1.MachineOSConfig) {
 	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(mosc)
 	if err != nil {
-		utilruntime.HandleError(fmt.Errorf("Couldn't get key for object %#v: %v", mosc, err))
+		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %#v: %v", mosc, err))
 		return
 	}
 	ctrl.mosQueue.Add(key)
@@ -295,7 +296,7 @@ func (ctrl *Controller) enqueueMachineOSConfig(mosc *mcfgv1alpha1.MachineOSConfi
 func (ctrl *Controller) enqueueMachineOSBuild(mosb *mcfgv1alpha1.MachineOSBuild) {
 	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(mosb)
 	if err != nil {
-		utilruntime.HandleError(fmt.Errorf("Couldn't get key for object %#v: %v", mosb, err))
+		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %#v: %v", mosb, err))
 		return
 	}
 
@@ -330,13 +331,14 @@ func (ctrl *Controller) customBuildPodUpdater(pod *corev1.Pod) error {
 	}
 
 	klog.V(4).Infof("Build pod (%s) is %s", pod.Name, pod.Status.Phase)
+	klog.V(4).Infof("Dalia was here :-D")
 
 	mosc, mosb, err := ctrl.getConfigAndBuildForPool(pool)
 	if err != nil {
 		return err
 	}
 	if mosc == nil || mosb == nil {
-		return fmt.Errorf("Missing MOSC/MOSB for pool %s", pool.Name)
+		return fmt.Errorf("missing MOSC/MOSB for pool %s", pool.Name)
 	}
 
 	// We cannot solely rely upon the pod phase to determine whether the build
@@ -1295,12 +1297,12 @@ func (ctrl *Controller) deleteMachineOSConfig(cur interface{}) {
 	if !ok {
 		tombstone, ok := cur.(cache.DeletedFinalStateUnknown)
 		if !ok {
-			utilruntime.HandleError(fmt.Errorf("Couldn't get object from tombstone %#v", cur))
+			utilruntime.HandleError(fmt.Errorf("couldn't get object from tombstone %#v", cur))
 			return
 		}
 		mosc, ok = tombstone.Obj.(*mcfgv1alpha1.MachineOSConfig)
 		if !ok {
-			utilruntime.HandleError(fmt.Errorf("Tombstone contained object that is not a MachineOSConfig %#v", cur))
+			utilruntime.HandleError(fmt.Errorf("tombstone contained object that is not a MachineOSConfig %#v", cur))
 			return
 		}
 	}
@@ -1337,12 +1339,12 @@ func (ctrl *Controller) deleteMachineOSBuild(mosb interface{}) {
 	if !ok {
 		tombstone, ok := mosb.(cache.DeletedFinalStateUnknown)
 		if !ok {
-			utilruntime.HandleError(fmt.Errorf("Couldn't get object from tombstone %#v", mosb))
+			utilruntime.HandleError(fmt.Errorf("couldn't get object from tombstone %#v", mosb))
 			return
 		}
 		m, ok = tombstone.Obj.(*mcfgv1alpha1.MachineOSBuild)
 		if !ok {
-			utilruntime.HandleError(fmt.Errorf("Tombstone contained object that is not a MachineOSBuild %#v", mosb))
+			utilruntime.HandleError(fmt.Errorf("tombstone contained object that is not a MachineOSBuild %#v", mosb))
 			return
 		}
 	}
@@ -1512,4 +1514,100 @@ func isBuildPodError(pod *corev1.Pod) bool {
 	}
 
 	return false
+}
+
+func (ctrl *Controller) monitorBuildPods() {
+	klog.V(4).Infof("Starting to monitor build pods")
+	ctrl.podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			newPod := newObj.(*corev1.Pod)
+			klog.V(4).Infof("Pod update detected: %s/%s", newPod.Namespace, newPod.Name)
+			if ctrl.isBuildPod(newPod) {
+				klog.V(4).Infof("Detected build pod: %s/%s", newPod.Namespace, newPod.Name)
+				ctrl.handleBuildPodUpdate(newPod)
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			pod, ok := obj.(*corev1.Pod)
+			if ok && ctrl.isBuildPod(pod) {
+				klog.V(4).Infof("Detected build pod deletion: %s/%s", pod.Namespace, pod.Name)
+				ctrl.handleBuildPodDeletion(pod)
+			}
+		},
+	})
+}
+
+func (ctrl *Controller) isBuildPod(pod *corev1.Pod) bool {
+	isBuildPod := pod.Labels["build.openshift.io/build"] == "true"
+	klog.V(4).Infof("Checking if pod %s/%s is a build pod: %v", pod.Namespace, pod.Name, isBuildPod)
+	return isBuildPod
+}
+
+func (ctrl *Controller) handleBuildPodUpdate(pod *corev1.Pod) {
+	klog.V(4).Infof("Handling build pod update: %s/%s", pod.Namespace, pod.Name)
+	if pod.Status.Phase == corev1.PodFailed && ctrl.isPodEvicted(pod) {
+		klog.V(4).Infof("Build pod %s/%s evicted. Rescheduling build.", pod.Namespace, pod.Name)
+		ctrl.rescheduleBuild(pod)
+	} else if pod.Status.Phase == corev1.PodFailed {
+		klog.V(4).Infof("Build pod %s/%s failed. Marking build as failed.", pod.Namespace, pod.Name)
+		ctrl.markBuildFailedDueToError(pod)
+	} else {
+		klog.V(4).Infof("Build pod %s/%s status phase: %s", pod.Namespace, pod.Name, pod.Status.Phase)
+	}
+}
+
+func (ctrl *Controller) isPodEvicted(pod *corev1.Pod) bool {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Reason == "Evicted" {
+			klog.Infof("Pod %s/%s was evicted", pod.Namespace, pod.Name)
+			return true
+		}
+	}
+	klog.V(4).Infof("Pod %s/%s was not evicted", pod.Namespace, pod.Name)
+	return false
+}
+
+func (ctrl *Controller) handleBuildPodDeletion(pod *corev1.Pod) {
+	klog.V(4).Infof("Handling build pod deletion: %s/%s", pod.Namespace, pod.Name)
+	if ctrl.isPodEvicted(pod) {
+		klog.Infof("Build pod %s/%s evicted due to node drain. Rescheduling build.", pod.Namespace, pod.Name)
+		ctrl.rescheduleBuild(pod)
+	}
+}
+
+func (ctrl *Controller) markBuildFailedDueToError(pod *corev1.Pod) {
+	klog.V(4).Infof("Marking build as failed due to error in pod: %s/%s", pod.Namespace, pod.Name)
+	pool, err := ctrl.mcfgclient.MachineconfigurationV1().MachineConfigPools().Get(context.TODO(), pod.Labels[TargetMachineConfigPoolLabelKey], metav1.GetOptions{})
+	if err != nil {
+		klog.Errorf("Failed to get MachineConfigPool for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+		return
+	}
+
+	mosc, mosb, err := ctrl.getConfigAndBuildForPool(pool)
+	if err != nil {
+		klog.Errorf("No MachineOSBuild found for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+		return
+	}
+	klog.V(4).Infof("Marking build %s as failed for MachineOSConfig %s", mosb.Name, mosc.Name)
+	ctrl.markBuildFailed(mosc, mosb)
+}
+
+func (ctrl *Controller) rescheduleBuild(pod *corev1.Pod) {
+	klog.V(4).Infof("Rescheduling build for pod: %s/%s", pod.Namespace, pod.Name)
+	pool, err := ctrl.mcfgclient.MachineconfigurationV1().MachineConfigPools().Get(context.TODO(), pod.Labels[TargetMachineConfigPoolLabelKey], metav1.GetOptions{})
+	if err != nil {
+		klog.Errorf("Failed to get MachineConfigPool for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+		return
+	}
+
+	mosc, mosb, err := ctrl.getConfigAndBuildForPool(pool)
+	if err != nil {
+		klog.Errorf("No MachineOSBuild found for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+		return
+	}
+
+	klog.Infof("Starting build for MachineConfigPool: %s", pool.Name)
+	if err := ctrl.startBuildForMachineConfigPool(mosc, mosb); err != nil {
+		klog.Errorf("Failed to reschedule build %s: %v", mosb.Name, err)
+	}
 }
