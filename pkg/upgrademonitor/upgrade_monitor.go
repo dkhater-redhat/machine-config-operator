@@ -3,6 +3,7 @@ package upgrademonitor
 import (
 	"context"
 	"fmt"
+	"regexp"
 
 	features "github.com/openshift/api/features"
 	machineconfigurationalphav1 "github.com/openshift/client-go/machineconfiguration/applyconfigurations/machineconfiguration/v1alpha1"
@@ -305,8 +306,11 @@ func generateAndApplyMachineConfigNodes(
 		newMCNode.Spec.ConfigVersion = mcfgalphav1.MachineConfigNodeSpecMachineConfigVersion{
 			Desired: node.Annotations["machineconfiguration.openshift.io/desiredConfig"],
 		}
-		if newMCNode.Spec.ConfigVersion.Desired == "" {
-			newMCNode.Spec.ConfigVersion.Desired = NotYetSet
+		klog.Infof("Debug: Current value of ConfigVersion.Desired for node %s: %s", node.Name, newMCNode.Spec.ConfigVersion.Desired)
+
+		if newMCNode.Spec.ConfigVersion.Desired == "" || !isValidConfigVersion(newMCNode.Spec.ConfigVersion.Desired) {
+			klog.Infof("Invalid ConfigVersion.Desired for node %s: %s. Setting to a valid default.", node.Name, newMCNode.Spec.ConfigVersion.Desired)
+			newMCNode.Spec.ConfigVersion.Desired = generateDefaultConfigVersion(node)
 		}
 		newMCNode.Name = node.Name
 		newMCNode.Spec.Pool = mcfgalphav1.MCOObjectReference{Name: pool}
@@ -329,6 +333,18 @@ func generateAndApplyMachineConfigNodes(
 		}
 	}
 	return nil
+}
+
+// isValidConfigVersion checks if the config version matches the expected pattern
+func isValidConfigVersion(version string) bool {
+	regex := `^([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])(\.([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]{0,61}[a-zA-Z0-9]))*$`
+	match, _ := regexp.MatchString(regex, version)
+	return match
+}
+
+// generateDefaultConfigVersion creates a default config version value
+func generateDefaultConfigVersion(node *corev1.Node) string {
+	return fmt.Sprintf("default-%s", node.Name)
 }
 
 func isParentConditionChanged(old, new metav1.Condition) bool {
