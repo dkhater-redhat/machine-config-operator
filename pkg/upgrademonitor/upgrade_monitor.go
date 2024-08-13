@@ -3,6 +3,7 @@ package upgrademonitor
 import (
 	"context"
 	"fmt"
+	"regexp"
 
 	features "github.com/openshift/api/features"
 	machineconfigurationalphav1 "github.com/openshift/client-go/machineconfiguration/applyconfigurations/machineconfiguration/v1alpha1"
@@ -88,7 +89,10 @@ func generateAndApplyMachineConfigNodes(
 	imageSetSpec []mcfgalphav1.MachineConfigNodeSpecPinnedImageSet,
 	fgAccessor featuregates.FeatureGateAccess,
 ) error {
+	klog.Infof("Starting generateAndApplyMachineConfigNodes for node: %s", node.Name)
+
 	if fgAccessor == nil || node == nil || parentCondition == nil || mcfgClient == nil {
+		klog.Infof("MCN Featuregate is not enabled. Please enable the TechPreviewNoUpgrade featureset to use MachineConfigNodes")
 		return nil
 	}
 	fg, err := fgAccessor.CurrentFeatureGates()
@@ -106,11 +110,17 @@ func generateAndApplyMachineConfigNodes(
 		pool = "worker"
 	} else if _, ok = node.Labels["node-role.kubernetes.io/master"]; ok {
 		pool = "master"
+	} else {
+		klog.Errorf("Node %s does not have a valid role label. Expected labels: 'node-role.kubernetes.io/worker' or 'node-role.kubernetes.io/master'", node.Name)
+		return fmt.Errorf("node %s does not have a valid role label", node.Name)
 	}
+	klog.Infof("Assigned pool for node %s: %s", node.Name, pool)
 
 	// get the existing MCN, or if it DNE create one below
 	mcNode, needNewMCNode := createOrGetMachineConfigNode(mcfgClient, node)
 	newMCNode := mcNode.DeepCopy()
+	klog.Infof("Retrieved MCN for node %s: %v, needNewMCNode: %v", node.Name, mcNode.Name, needNewMCNode)
+
 	newParentCondition := metav1.Condition{
 		Type:               string(parentCondition.State),
 		Status:             parentStatus,
@@ -130,6 +140,7 @@ func generateAndApplyMachineConfigNodes(
 
 	}
 	reset := false
+	klog.Infof("Processing conditions for node %s", node.Name)
 	if newParentCondition.Type == string(mcfgalphav1.MachineConfigNodeUpdated) {
 		reset = true
 	}
@@ -298,6 +309,10 @@ func generateAndApplyMachineConfigNodes(
 		}
 		if newMCNode.Spec.ConfigVersion.Desired == "" {
 			newMCNode.Spec.ConfigVersion.Desired = NotYetSet
+			klog.Infof("Debug: Current value of ConfigVersion.Desired for node %s: %s", node.Name, newMCNode.Spec.ConfigVersion.Desired)
+		}
+		if newMCNode.Spec.ConfigVersion.Desired == "" || !isValidConfigVersion(newMCNode.Spec.ConfigVersion.Desired) {
+			klog.Infof("Invalid ConfigVersion.Desired for node %s: %s. Setting to a valid default.", node.Name, newMCNode.Spec.ConfigVersion.Desired)
 		}
 		newMCNode.Name = node.Name
 		newMCNode.Spec.Pool = mcfgalphav1.MCOObjectReference{Name: pool}
@@ -320,6 +335,12 @@ func generateAndApplyMachineConfigNodes(
 		}
 	}
 	return nil
+}
+
+func isValidConfigVersion(version string) bool {
+	regex := `^([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])(\.([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]{0,61}[a-zA-Z0-9]))*$`
+	match, _ := regexp.MatchString(regex, version)
+	return match
 }
 
 func isParentConditionChanged(old, new metav1.Condition) bool {
