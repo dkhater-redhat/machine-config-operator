@@ -311,7 +311,7 @@ func generateAndApplyMachineConfigNodes(
 			newMCNode.Spec.ConfigVersion.Desired = NotYetSet
 			klog.Infof("Debug: Current value of ConfigVersion.Desired for node %s: %s", node.Name, newMCNode.Spec.ConfigVersion.Desired)
 		}
-		if newMCNode.Spec.ConfigVersion.Desired == "" || !isValidConfigVersion(newMCNode.Spec.ConfigVersion.Desired) {
+		if !isValidConfigVersion(newMCNode.Spec.ConfigVersion.Desired) {
 			klog.Infof("Invalid ConfigVersion.Desired for node %s: %s. Setting to a valid default.", node.Name, newMCNode.Spec.ConfigVersion.Desired)
 		}
 		newMCNode.Name = node.Name
