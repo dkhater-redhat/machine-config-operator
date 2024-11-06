@@ -1215,6 +1215,12 @@ func getAllCandidateMachines(layered bool, config *mcfgv1alpha1.MachineOSConfig,
 		return nil, 0
 	}
 	capacity := maxUnavailable - len(unavail)
+
+	// Ensure capacity is not negative
+	if capacity < 0 {
+		capacity = 0
+	}
+
 	failingThisConfig := 0
 	// We only look at nodes which aren't already targeting our desired config
 	var nodes []*corev1.Node
@@ -1249,6 +1255,9 @@ func getAllCandidateMachines(layered bool, config *mcfgv1alpha1.MachineOSConfig,
 		return nil, 0
 	}
 	capacity -= failingThisConfig
+	if capacity < 0 {
+		capacity = 0
+	}
 	return nodes, uint(capacity)
 }
 
