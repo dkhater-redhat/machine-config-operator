@@ -1209,7 +1209,7 @@ func (ctrl *Controller) updateCandidateNode(mosc *mcfgv1alpha1.MachineOSConfig, 
 // getAllCandidateMachines returns all possible nodes which can be updated to the target config, along with a maximum
 // capacity.  It is the reponsibility of the caller to choose a subset of the nodes given the capacity.
 func getAllCandidateMachines(layered bool, config *mcfgv1alpha1.MachineOSConfig, build *mcfgv1alpha1.MachineOSBuild, pool *mcfgv1.MachineConfigPool, nodesInPool []*corev1.Node, maxUnavailable int) ([]*corev1.Node, uint) {
-	unavail := getUnavailableMachines(nodesInPool, pool, layered, build)
+	unavail := getUnavailableMachines(nodesInPool, pool, layered)
 	if len(unavail) >= maxUnavailable {
 		klog.V(4).Infof("Pool %s: No nodes available for updates", pool.Name)
 		return nil, 0
