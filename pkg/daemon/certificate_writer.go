@@ -132,6 +132,9 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 		}
 
 		if controllerConfig.Annotations[ctrlcommon.ServiceCARotateAnnotation] == ctrlcommon.ServiceCARotateTrue && dn.node.Annotations[constants.ControllerConfigSyncServerCA] != controllerConfig.Annotations[ctrlcommon.ServiceCARotateAnnotation] {
+			klog.Infof("Certificate rotation detected: ServiceCARotateAnnotation=%s, node annotation=%s",
+				controllerConfig.Annotations[ctrlcommon.ServiceCARotateAnnotation],
+				dn.node.Annotations[constants.ControllerConfigSyncServerCA])
 			cm, cmErr = dn.kubeClient.CoreV1().ConfigMaps("openshift-machine-config-operator").Get(context.TODO(), "kubeconfig-data", v1.GetOptions{})
 			if cmErr != nil {
 				klog.Errorf("Error retrieving kubeconfig-data. %v", cmErr)
@@ -150,12 +153,14 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 							return fmt.Errorf("could not unmarshal kubeconfig into struct. Data: %s, Error: %v", string(kcBytes), err)
 						}
 						kubeConfigDiff = !bytes.Equal(bytes.TrimSpace(onDiskKC.Clusters[0].Cluster.CertificateAuthorityData), bytes.TrimSpace(data))
+						klog.Infof("Certificate rotation: kubeConfigDiff=%t (CA bundle differs between ConfigMap and on-disk kubeconfig)", kubeConfigDiff)
 
 						// We should always write the latest certs from the configmap onto disk, but we should check what was changed/modified
 						// if any certs were added or updated, determine if we need to defer the kubelet restarting
 						certsConfigmap := strings.SplitAfter(strings.TrimSpace(string(data)), "-----END CERTIFICATE-----")
 						certsDisk := strings.SplitAfter(strings.TrimSpace(string(onDiskKC.Clusters[0].Cluster.CertificateAuthorityData)), "-----END CERTIFICATE-----")
 						var addedOrUpdatedCAs []string
+						klog.Infof("Certificate rotation: found %d certs in ConfigMap, %d certs on disk", len(certsConfigmap), len(certsDisk))
 
 						for _, cert := range certsConfigmap {
 							found := false
@@ -167,6 +172,7 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 							}
 							if !found {
 								addedOrUpdatedCAs = append(addedOrUpdatedCAs, cert)
+								klog.Info("Certificate rotation: found new or updated cert (not present on disk)")
 							}
 
 							b, _ := pem.Decode([]byte(cert))
@@ -183,6 +189,7 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 							fullCA = append(fullCA, cert)
 						}
 
+						klog.Infof("Certificate rotation: processing %d added/updated certs to determine if kubelet restart should be deferred", len(addedOrUpdatedCAs))
 						dn.deferKubeletRestart = true
 						for _, cert := range addedOrUpdatedCAs {
 							b, _ := pem.Decode([]byte(cert))
@@ -196,17 +203,21 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 								continue
 							}
 							logSystem("Cert not found in kubeconfig. This means we need to write to disk. Subject is: %s", c.Subject.CommonName)
+							klog.Infof("Certificate rotation: examining cert with CommonName=%s", c.Subject.CommonName)
 							// Localhost signers rotate randomly during upgrades - defer restart to avoid unnecessary kubelet restarts.
 							// All other signers (including lb-signer) require immediate restart to reload MCD's Kubernetes client.
 							if !strings.Contains(c.Subject.CommonName, "kube-apiserver-localhost-signer") && !strings.Contains(c.Subject.CommonName, "openshift-kube-apiserver-operator_localhost-recovery-serving-signer") {
 								logSystem("Need to restart kubelet")
+								klog.Infof("Certificate rotation: cert %s requires immediate kubelet restart (not a localhost signer)", c.Subject.CommonName)
 								dn.deferKubeletRestart = false
 							} else {
 								logSystem("Deferring kubelet restart for localhost signer")
+								klog.Infof("Certificate rotation: cert %s is a localhost signer, deferring kubelet restart", c.Subject.CommonName)
 							}
 						}
 
 						if kubeConfigDiff {
+							klog.Infof("Certificate rotation: writing updated CA bundle to %s (deferKubeletRestart=%t)", kubeConfigPath, dn.deferKubeletRestart)
 							var newData []byte
 							if onDiskKC.Clusters == nil {
 								return errors.New("clusters cannot be nil")
@@ -219,7 +230,7 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 							}
 
 							pathToData[kubeConfigPath] = newData
-							klog.Infof("Writing new Data to /etc/kubernetes/kubeconfig")
+							klog.Infof("Certificate rotation: prepared kubeconfig update with %d certs for %s", len(fullCA), kubeConfigPath)
 						}
 					} else {
 						klog.Info("Could not read kubeconfig file, or data does not need to be changed")
@@ -282,7 +293,10 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 	klog.Infof("Certificate was synced from controllerconfig resourceVersion %s", controllerConfig.ObjectMeta.ResourceVersion)
 	rotationInProgress := false
 	if controllerConfig.Annotations[ctrlcommon.ServiceCARotateAnnotation] == ctrlcommon.ServiceCARotateTrue && oldAnno != controllerConfig.Annotations[ctrlcommon.ServiceCARotateAnnotation] && cmErr == nil && kubeConfigDiff {
+		klog.Infof("Certificate rotation: entering main rotation block (annotation=%s, oldAnno=%s, cmErr=%v, kubeConfigDiff=%t)",
+			controllerConfig.Annotations[ctrlcommon.ServiceCARotateAnnotation], oldAnno, cmErr, kubeConfigDiff)
 		if len(onDiskKC.Clusters[0].Cluster.CertificateAuthorityData) > 0 {
+			klog.Infof("Certificate rotation: updating kubelet kubeconfig with new CA bundle")
 			// Always update kubelet's kubeconfig with new CA bundle
 			f, err := os.ReadFile("/var/lib/kubelet/kubeconfig")
 			if err != nil && os.IsNotExist(err) {
@@ -308,21 +322,27 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 			if err != nil {
 				return err
 			}
+			klog.Infof("Certificate rotation: wrote kubelet kubeconfig to disk")
 
 			// Restart kubelet only if deferKubeletRestart is false
 			if !dn.deferKubeletRestart {
+				klog.Infof("Certificate rotation: deferKubeletRestart=false, proceeding with kubelet restart and MCD exit")
 				logSystem("restarting kubelet due to server-ca rotation")
+				klog.Infof("Certificate rotation: stopping kubelet")
 				if err := runCmdSync("systemctl", "stop", "kubelet"); err != nil {
 					return err
 				}
 
+				klog.Infof("Certificate rotation: running daemon-reload")
 				if err := runCmdSync("systemctl", "daemon-reload"); err != nil {
 					return err
 				}
 
+				klog.Infof("Certificate rotation: starting kubelet")
 				if err := runCmdSync("systemctl", "start", "kubelet"); err != nil {
 					return err
 				}
+				klog.Infof("Certificate rotation: kubelet restarted successfully")
 
 				// Update node annotation only after successfully restarting kubelet.
 				// This ensures we retry if MCD restarts before completing the rotation.
@@ -332,9 +352,12 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 				if dn.node.Annotations[constants.ControllerConfigSyncServerCA] != controllerConfig.Annotations[ctrlcommon.ServiceCARotateAnnotation] {
 					annos[constants.ControllerConfigSyncServerCA] = controllerConfig.Annotations[ctrlcommon.ServiceCARotateAnnotation]
 				}
+				klog.Infof("Certificate rotation: updating node annotations (ControllerConfigResourceVersion=%s, ControllerConfigSyncServerCA=%s)",
+					controllerConfig.ObjectMeta.ResourceVersion, controllerConfig.Annotations[ctrlcommon.ServiceCARotateAnnotation])
 				if _, err := dn.nodeWriter.SetAnnotations(annos); err != nil {
 					return fmt.Errorf("failed to set annotations on node: %w", err)
 				}
+				klog.Infof("Certificate rotation: node annotations updated successfully")
 
 				// Exit MCD after restarting kubelet to reload MCD's own certificates.
 				// The NodeWriter's Kubernetes client was initialized at startup with the old CA bundle,
@@ -352,15 +375,17 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 			// - x509 error handler when kubelet encounters cert errors
 			// This preserves the in-memory deferKubeletRestart state so the restart can happen later.
 			rotationInProgress = true
+			klog.Infof("Certificate rotation: deferKubeletRestart=true, entering deferred rotation state (not exiting MCD, not updating annotation)")
 			logSystem("Deferring kubelet restart - kubeconfig updated but kubelet will pick up " +
 				"changes on next restart or when triggered by x509 errors")
-			klog.Infof("Kubelet kubeconfig updated with new CA bundle, " +
+			klog.Infof("Certificate rotation: kubelet kubeconfig updated with new CA bundle, " +
 				"restart deferred for localhost signers")
 		}
 	}
 
 	// Only update annotation if not in deferred rotation state
 	if !rotationInProgress {
+		klog.Infof("Certificate rotation: not in deferred state, updating node annotations")
 		annos := map[string]string{
 			constants.ControllerConfigResourceVersionKey: controllerConfig.ObjectMeta.ResourceVersion,
 		}
@@ -373,6 +398,9 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 		if _, err := dn.nodeWriter.SetAnnotations(annos); err != nil {
 			return fmt.Errorf("failed to set annotations on node: %w", err)
 		}
+		klog.Infof("Certificate rotation: final annotation update complete")
+	} else {
+		klog.Infof("Certificate rotation: skipping annotation update (rotationInProgress=true)")
 	}
 
 	klog.V(4).Infof("Finished syncing ControllerConfig %q (%v)", key, time.Since(startTime))
