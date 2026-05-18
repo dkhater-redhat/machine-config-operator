@@ -171,8 +171,19 @@ func (a *Assertions) SecretExists(name string, msgAndArgs ...interface{}) {
 // Asserts that a Secret is deleted.
 func (a *Assertions) SecretDoesNotExist(name string, msgAndArgs ...interface{}) {
 	a.t.Helper()
-	stateFunc := func(_ *corev1.Secret, err error) (bool, error) {
-		return a.deleted(err)
+
+	// Capture the original UID if the secret exists
+	ctx, cancel := a.getContextAndCancel()
+	defer cancel()
+
+	originalSecret, err := a.kubeclient.CoreV1().Secrets(mcoNamespace).Get(ctx, name, metav1.GetOptions{})
+	var originalUID string
+	if err == nil {
+		originalUID = string(originalSecret.UID)
+	}
+
+	stateFunc := func(secret *corev1.Secret, err error) (bool, error) {
+		return a.deletedWithUID(secret, err, originalUID)
 	}
 
 	a.secretReachesState(name, stateFunc, msgAndArgs...)
@@ -191,8 +202,19 @@ func (a *Assertions) ConfigMapExists(name string, msgAndArgs ...interface{}) {
 // Asserts that a ConfigMap is deleted.
 func (a *Assertions) ConfigMapDoesNotExist(name string, msgAndArgs ...interface{}) {
 	a.t.Helper()
-	stateFunc := func(_ *corev1.ConfigMap, err error) (bool, error) {
-		return a.deleted(err)
+
+	// Capture the original UID if the configmap exists
+	ctx, cancel := a.getContextAndCancel()
+	defer cancel()
+
+	originalCM, err := a.kubeclient.CoreV1().ConfigMaps(mcoNamespace).Get(ctx, name, metav1.GetOptions{})
+	var originalUID string
+	if err == nil {
+		originalUID = string(originalCM.UID)
+	}
+
+	stateFunc := func(cm *corev1.ConfigMap, err error) (bool, error) {
+		return a.deletedWithUID(cm, err, originalUID)
 	}
 
 	a.configMapReachesState(name, stateFunc, msgAndArgs...)
@@ -211,8 +233,19 @@ func (a *Assertions) PodExists(podName string, msgAndArgs ...interface{}) {
 // Asserts that a Pod is deleted.
 func (a *Assertions) PodDoesNotExist(podName string, msgAndArgs ...interface{}) {
 	a.t.Helper()
-	stateFunc := func(_ *corev1.Pod, err error) (bool, error) {
-		return a.deleted(err)
+
+	// Capture the original UID if the pod exists
+	ctx, cancel := a.getContextAndCancel()
+	defer cancel()
+
+	originalPod, err := a.kubeclient.CoreV1().Pods(mcoNamespace).Get(ctx, podName, metav1.GetOptions{})
+	var originalUID string
+	if err == nil {
+		originalUID = string(originalPod.UID)
+	}
+
+	stateFunc := func(pod *corev1.Pod, err error) (bool, error) {
+		return a.deletedWithUID(pod, err, originalUID)
 	}
 
 	a.podReachesState(podName, stateFunc, msgAndArgs...)
@@ -299,8 +332,19 @@ func (a *Assertions) JobExists(jobName string, msgAndArgs ...interface{}) {
 // Asserts that a Job is deleted.
 func (a *Assertions) JobDoesNotExist(jobName string, msgAndArgs ...interface{}) {
 	a.t.Helper()
-	stateFunc := func(_ *batchv1.Job, err error) (bool, error) {
-		return a.deleted(err)
+
+	// Capture the original UID if the job exists
+	ctx, cancel := a.getContextAndCancel()
+	defer cancel()
+
+	originalJob, err := a.kubeclient.BatchV1().Jobs(mcoNamespace).Get(ctx, jobName, metav1.GetOptions{})
+	var originalUID string
+	if err == nil {
+		originalUID = string(originalJob.UID)
+	}
+
+	stateFunc := func(job *batchv1.Job, err error) (bool, error) {
+		return a.deletedWithUID(job, err, originalUID)
 	}
 
 	a.jobReachesState(jobName, stateFunc, msgAndArgs...)
@@ -317,13 +361,17 @@ func (a *Assertions) MachineOSConfigExists(mosb *mcfgv1.MachineOSConfig, msgAndA
 }
 
 // Asserts that a MachineOSConfig is deleted.
-func (a *Assertions) MachineOSConfigDoesNotExist(mosb *mcfgv1.MachineOSConfig, msgAndArgs ...interface{}) {
+func (a *Assertions) MachineOSConfigDoesNotExist(mosc *mcfgv1.MachineOSConfig, msgAndArgs ...interface{}) {
 	a.t.Helper()
-	stateFunc := func(_ *mcfgv1.MachineOSConfig, err error) (bool, error) {
-		return a.deleted(err)
+
+	// Capture the original UID from the provided object
+	originalUID := string(mosc.UID)
+
+	stateFunc := func(apiMosc *mcfgv1.MachineOSConfig, err error) (bool, error) {
+		return a.deletedWithUID(apiMosc, err, originalUID)
 	}
 
-	a.machineOSConfigReachesState(mosb, stateFunc, msgAndArgs...)
+	a.machineOSConfigReachesState(mosc, stateFunc, msgAndArgs...)
 }
 
 // Asserts that a MachineOSBuild has failed.
@@ -359,8 +407,12 @@ func (a *Assertions) MachineOSBuildExists(mosb *mcfgv1.MachineOSBuild, msgAndArg
 // Asserts that a MachineOSBuild is deleted.
 func (a *Assertions) MachineOSBuildDoesNotExist(mosb *mcfgv1.MachineOSBuild, msgAndArgs ...interface{}) {
 	a.t.Helper()
-	stateFunc := func(_ *mcfgv1.MachineOSBuild, err error) (bool, error) {
-		return a.deleted(err)
+
+	// Capture the original UID from the provided object
+	originalUID := string(mosb.UID)
+
+	stateFunc := func(apiMosb *mcfgv1.MachineOSBuild, err error) (bool, error) {
+		return a.deletedWithUID(apiMosb, err, originalUID)
 	}
 
 	a.machineOSBuildReachesState(mosb, stateFunc, msgAndArgs...)
@@ -389,8 +441,19 @@ func (a *Assertions) PodHasOwnerSet(podName string, msgAndArgs ...interface{}) {
 // Asserts that an ImageStreamTag is deleted.
 func (a *Assertions) ImageDoesNotExist(imageName string, msgAndArgs ...interface{}) {
 	a.t.Helper()
-	stateFunc := func(_ *imagev1.ImageStreamTag, err error) (bool, error) {
-		return a.deleted(err)
+
+	// Capture the original UID if the image exists
+	ctx, cancel := a.getContextAndCancel()
+	defer cancel()
+
+	originalImage, err := a.imageclient.ImageV1().ImageStreamTags(mcoNamespace).Get(ctx, imageName, metav1.GetOptions{})
+	var originalUID string
+	if err == nil {
+		originalUID = string(originalImage.UID)
+	}
+
+	stateFunc := func(image *imagev1.ImageStreamTag, err error) (bool, error) {
+		return a.deletedWithUID(image, err, originalUID)
 	}
 
 	a.imageStreamTagReachesState(imageName, stateFunc, msgAndArgs...)
@@ -409,8 +472,12 @@ func (a *Assertions) MachineConfigExists(mc *mcfgv1.MachineConfig, msgAndArgs ..
 // Asserts that a MachineConfig is deleted.
 func (a *Assertions) MachineConfigDoesNotExist(mc *mcfgv1.MachineConfig, msgAndArgs ...interface{}) {
 	a.t.Helper()
-	stateFunc := func(_ *mcfgv1.MachineConfig, err error) (bool, error) {
-		return a.deleted(err)
+
+	// Capture the original UID from the provided object
+	originalUID := string(mc.UID)
+
+	stateFunc := func(apiMC *mcfgv1.MachineConfig, err error) (bool, error) {
+		return a.deletedWithUID(apiMC, err, originalUID)
 	}
 
 	a.machineConfigReachesState(mc, stateFunc, msgAndArgs...)
@@ -767,6 +834,60 @@ func isDeleted(err error) (bool, error) {
 	}
 
 	return false, err
+}
+
+// Determines if an object with a specific UID is deleted or replaced.
+// If originalUID is provided and the current object has a different UID,
+// consider it deleted (replaced with a new object).
+func (a *Assertions) deletedWithUID(obj interface{}, err error, originalUID string) (bool, error) {
+	// If we got a NotFound error, the object is definitely deleted
+	if k8serrors.IsNotFound(err) {
+		return true, nil
+	}
+
+	// If there's another error, return it
+	if err != nil {
+		if a.poll {
+			return false, err
+		}
+		return false, err
+	}
+
+	// Object exists - check if it has a different UID (i.e., it was replaced)
+	if originalUID != "" {
+		// Extract UID from the object
+		var currentUID string
+		switch v := obj.(type) {
+		case *corev1.Pod:
+			currentUID = string(v.UID)
+		case *batchv1.Job:
+			currentUID = string(v.UID)
+		case *mcfgv1.MachineOSBuild:
+			currentUID = string(v.UID)
+		case *corev1.Secret:
+			currentUID = string(v.UID)
+		case *corev1.ConfigMap:
+			currentUID = string(v.UID)
+		case *mcfgv1.MachineConfig:
+			currentUID = string(v.UID)
+		case *mcfgv1.MachineOSConfig:
+			currentUID = string(v.UID)
+		case *imagev1.ImageStreamTag:
+			currentUID = string(v.UID)
+		}
+
+		// If the UID changed, the original object was deleted/replaced
+		if currentUID != originalUID {
+			return true, nil
+		}
+	}
+
+	// Object still exists with same UID (or we don't have original UID)
+	if a.poll {
+		return false, nil
+	}
+
+	return false, fmt.Errorf("object still exists")
 }
 
 func prefixMsgAndArgs(item interface{}, items []interface{}) []interface{} {
