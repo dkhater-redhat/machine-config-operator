@@ -157,6 +157,10 @@ type Daemon struct {
 
 	deferKubeletRestart bool
 
+	// x509 error tracking for recovery
+	firstX509ErrorTime *time.Time
+	x509ErrorMutex     sync.Mutex
+
 	irreconcilableReporter IrreconcilableReporter
 
 	// Ensures that only a single syncOSImagePullSecrets call can run at a time.
@@ -1414,13 +1418,53 @@ func (dn *Daemon) Run(stopCh <-chan struct{}, exitCh <-chan error, errCh chan er
 			klog.Errorf("Got an error from auxiliary tools: %v", err)
 			// we do not want to fail on any .HandleError call. Need to only fail when it is a watcher
 			// we might want to remove this last one. We will see.
-			if dn.deferKubeletRestart && strings.Contains(strings.ToLower(err.Error()), "x509") {
-				logSystem("Re-bootstrapping kubelet in response to deferred kubeconfig changes and %v", err)
-				err := dn.kubeletRebootstrap(context.TODO())
-				if err != nil {
-					return err
+
+			// Check for x509 errors (certificate issues)
+			if strings.Contains(strings.ToLower(err.Error()), "x509") ||
+			   strings.Contains(strings.ToLower(err.Error()), "certificate signed by unknown authority") {
+
+				// Track when x509 errors started
+				dn.x509ErrorMutex.Lock()
+				if dn.firstX509ErrorTime == nil {
+					now := time.Now()
+					dn.firstX509ErrorTime = &now
+					klog.Warningf("First x509 error detected - starting recovery timer: %v", err)
+					logSystem("x509 certificate error detected - monitoring for persistent failures")
 				}
-				return ErrAuxiliary
+
+				// Check how long we've been seeing x509 errors
+				errorDuration := time.Since(*dn.firstX509ErrorTime)
+				dn.x509ErrorMutex.Unlock()
+
+				// If deferred rotation is pending, handle it immediately
+				if dn.deferKubeletRestart {
+					logSystem("Re-bootstrapping kubelet in response to deferred kubeconfig changes and %v", err)
+					err := dn.kubeletRebootstrap(context.TODO())
+					if err != nil {
+						return err
+					}
+					return ErrAuxiliary
+				}
+
+				// If we've been stuck with x509 errors for 5 minutes, force recovery
+				if errorDuration > 5*time.Minute {
+					klog.Errorf("Persistent x509 errors for %v - forcing MCD restart to reload certificates", errorDuration)
+					logSystem("Persistent x509 errors for %v - exiting to force certificate reload", errorDuration)
+
+					// Exit with error code to trigger restart
+					// kubelet will restart the MCD pod, which will reload /etc/kubernetes/kubeconfig
+					os.Exit(1)
+				}
+
+				klog.Warningf("x509 error ongoing for %v (will force restart at 5 minutes)", errorDuration)
+			} else {
+				// Non-x509 error - reset tracking
+				dn.x509ErrorMutex.Lock()
+				if dn.firstX509ErrorTime != nil {
+					klog.Infof("x509 errors cleared - resetting recovery timer")
+					dn.firstX509ErrorTime = nil
+				}
+				dn.x509ErrorMutex.Unlock()
 			}
 		}
 	}
