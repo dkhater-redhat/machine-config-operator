@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
@@ -172,7 +173,14 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 	// We process if:
 	// a) The resourceVersion changed (new config data), OR
 	// b) ServiceCARotateAnnotation is "true" (cert rotation in progress)
+	klog.V(4).Infof("Certificate sync: checking if sync needed (current node rv=%s, new rv=%s, annotation=%s)",
+		currentNodeControllerConfigResource,
+		controllerConfig.ObjectMeta.ResourceVersion,
+		controllerConfig.Annotations[ctrlcommon.ServiceCARotateAnnotation])
+
 	if currentNodeControllerConfigResource != controllerConfig.ObjectMeta.ResourceVersion || controllerConfig.Annotations[ctrlcommon.ServiceCARotateAnnotation] == ctrlcommon.ServiceCARotateTrue {
+		klog.Infof("Certificate sync: processing ControllerConfig update (rv %s -> %s)",
+			currentNodeControllerConfigResource, controllerConfig.ObjectMeta.ResourceVersion)
 		pathToData := make(map[string][]byte)
 		kubeAPIServerServingCABytes := controllerConfig.Spec.KubeAPIServerServingCAData
 		cloudCA := controllerConfig.Spec.CloudProviderCAData
@@ -206,13 +214,22 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 		// - Critical signers (lb-signer): Update kubeconfig AND exit immediately
 		//
 		if currentNodeControllerConfigResource != controllerConfig.ObjectMeta.ResourceVersion {
+			klog.V(4).Infof("Proactive CA sync: ControllerConfig resourceVersion changed, checking if CA bundle changed")
+
 			// Check if the CA bundle actually changed
 			newCABundle := kubeAPIServerServingCABytes
 
 			// Read current kubeconfig from disk
 			kcBytes, err := os.ReadFile(kubeConfigPath)
 			if err != nil && !os.IsNotExist(err) {
+				klog.Errorf("Proactive CA sync: failed to read kubeconfig for CA comparison: %v", err)
 				return fmt.Errorf("failed to read kubeconfig for CA comparison: %w", err)
+			}
+
+			if kcBytes == nil {
+				klog.V(4).Infof("Proactive CA sync: kubeconfig does not exist yet, skipping CA comparison")
+			} else if newCABundle == nil {
+				klog.V(4).Infof("Proactive CA sync: new CA bundle is nil, skipping CA comparison")
 			}
 
 			if kcBytes != nil && newCABundle != nil {
@@ -222,8 +239,12 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 				}
 
 				// Compare CA bundles
+				oldCAHash := fmt.Sprintf("%x", sha256.Sum256(diskKC.Clusters[0].Cluster.CertificateAuthorityData))[:16]
+				newCAHash := fmt.Sprintf("%x", sha256.Sum256(newCABundle))[:16]
+				klog.V(4).Infof("Proactive CA sync: comparing CA bundles (old hash=%s, new hash=%s)", oldCAHash, newCAHash)
+
 				if !bytes.Equal(bytes.TrimSpace(diskKC.Clusters[0].Cluster.CertificateAuthorityData), bytes.TrimSpace(newCABundle)) {
-					klog.Infof("Proactive CA sync: CA bundle changed in ControllerConfig - analyzing changes")
+					klog.Infof("Proactive CA sync: CA bundle changed in ControllerConfig (old=%s, new=%s) - analyzing changes", oldCAHash, newCAHash)
 
 					// Parse both CA bundles to determine which certs changed
 					oldCerts := strings.SplitAfter(strings.TrimSpace(string(diskKC.Clusters[0].Cluster.CertificateAuthorityData)), "-----END CERTIFICATE-----")
@@ -337,8 +358,12 @@ func (dn *Daemon) syncControllerConfigHandler(key string) error {
 							logSystem("Proactive CA sync: kubeconfig updated, restart deferred for %s", deferReason)
 						}
 					}
+				} else {
+					klog.V(4).Infof("Proactive CA sync: CA bundle unchanged (hash=%s), no action needed", oldCAHash)
 				}
 			}
+		} else {
+			klog.V(4).Infof("Proactive CA sync: skipping (resourceVersion unchanged: %s)", currentNodeControllerConfigResource)
 		}
 
 		// Step 5: LEGACY CERTIFICATE ROTATION HANDLING BLOCK (Fallback)
