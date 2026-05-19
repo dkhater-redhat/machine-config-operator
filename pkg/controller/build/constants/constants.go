@@ -48,6 +48,12 @@ const (
 	RebuildMachineOSConfigAnnotationKey string = "machineconfiguration.openshift.io/rebuild"
 )
 
+// Finalizers for MachineOSBuild cleanup
+const (
+	// MachineOSBuildDeletionFinalizer ensures ImageStreamTags are deleted before MOSB removal
+	MachineOSBuildDeletionFinalizer = "machineconfiguration.openshift.io/machine-os-build-deletion"
+)
+
 // New annotations for pre-built image support
 const (
 	// PreBuiltImageAnnotationKey indicates a MachineOSConfig should be seeded with a pre-built image

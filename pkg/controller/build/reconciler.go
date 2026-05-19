@@ -967,6 +967,67 @@ func (b *buildReconciler) deleteMOSBImage(ctx context.Context, mosb *mcfgv1.Mach
 	return nil
 }
 
+// Handles cleanup when a MachineOSBuild is being deleted.
+// This ensures ImageStreamTags are pruned before the MOSB is removed.
+func (b *buildReconciler) handleMachineOSBuildDeletion(ctx context.Context, mosb *mcfgv1.MachineOSBuild) error {
+	// Check if our finalizer is present
+	hasFinalizer := false
+	for _, f := range mosb.GetFinalizers() {
+		if f == constants.MachineOSBuildDeletionFinalizer {
+			hasFinalizer = true
+			break
+		}
+	}
+
+	if !hasFinalizer {
+		// Finalizer already removed, nothing to do
+		return nil
+	}
+
+	klog.Infof("MachineOSBuild %q is being deleted, cleaning up ImageStreamTag", mosb.Name)
+
+	// Get the MachineOSConfig name for logging
+	moscName, err := utils.GetRequiredLabelValueFromObject(mosb, constants.MachineOSConfigNameLabelKey)
+	if err != nil {
+		moscName = "<unknown MachineOSConfig>"
+	}
+
+	// Delete the ImageStreamTag
+	if err := b.deleteMOSBImage(ctx, mosb, moscName); err != nil {
+		// Log the error but don't block deletion - the image might already be gone
+		klog.Warningf("Failed to delete image for MachineOSBuild %q during deletion: %v", mosb.Name, err)
+	}
+
+	// Delete the digest configmap if it exists
+	err = b.kubeclient.CoreV1().ConfigMaps(ctrlcommon.MCONamespace).Delete(ctx, utils.GetDigestConfigMapName(mosb), metav1.DeleteOptions{})
+	if err != nil && !k8serrors.IsNotFound(err) {
+		klog.Warningf("Failed to delete digest configmap for MachineOSBuild %q during deletion: %v", mosb.Name, err)
+	}
+
+	// Remove the finalizer
+	newFinalizers := []string{}
+	for _, f := range mosb.GetFinalizers() {
+		if f != constants.MachineOSBuildDeletionFinalizer {
+			newFinalizers = append(newFinalizers, f)
+		}
+	}
+	mosb.SetFinalizers(newFinalizers)
+
+	// Update the MOSB to remove the finalizer
+	_, err = b.mcfgclient.MachineconfigurationV1().MachineOSBuilds().Update(ctx, mosb, metav1.UpdateOptions{})
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			// MOSB was already deleted, that's fine
+			klog.Infof("MachineOSBuild %q was already deleted", mosb.Name)
+			return nil
+		}
+		return fmt.Errorf("failed to remove finalizer from MachineOSBuild %q: %w", mosb.Name, err)
+	}
+
+	klog.Infof("Removed finalizer from MachineOSBuild %q, allowing deletion to proceed", mosb.Name)
+	return nil
+}
+
 // Finds and deletes any other running builds for a given MachineOSConfig.
 func (b *buildReconciler) deleteOtherBuildsForMachineOSConfig(ctx context.Context, newMosb *mcfgv1.MachineOSBuild, mosc *mcfgv1.MachineOSConfig) error {
 	mosbList, err := b.getMachineOSBuildsForMachineOSConfig(mosc)
@@ -1096,6 +1157,11 @@ func (b *buildReconciler) syncMachineOSBuilds(ctx context.Context) error {
 // builder associated with it that one should be created.
 func (b *buildReconciler) syncMachineOSBuild(ctx context.Context, mosb *mcfgv1.MachineOSBuild) error {
 	return b.timeObjectOperation(mosb, syncingVerb, func() error {
+
+		// Handle MOSB deletion with finalizer
+		if mosb.DeletionTimestamp != nil {
+			return b.handleMachineOSBuildDeletion(ctx, mosb)
+		}
 
 		// It could be the case that the MCP the mosb in queue was targeting no longer is valid
 		mcp, err := b.machineConfigPoolLister.Get(mosb.ObjectMeta.Labels[constants.TargetMachineConfigPoolLabelKey])
@@ -1488,6 +1554,9 @@ func (b *buildReconciler) reuseImageForNewMOSB(ctx context.Context, mosc *mcfgv1
 		*metav1.NewControllerRef(mosc, mcfgv1.SchemeGroupVersion.WithKind("MachineOSConfig")),
 	})
 
+	// Add finalizer to ensure ImageStreamTag cleanup on deletion
+	newMosb.SetFinalizers(append(newMosb.GetFinalizers(), constants.MachineOSBuildDeletionFinalizer))
+
 	// check if a MOSB with the newly generated name already exists in the cluster
 	_, err = b.machineOSBuildLister.Get(newMosb.Name)
 	if k8serrors.IsNotFound(err) {
@@ -1876,6 +1945,7 @@ func (b *buildReconciler) createSyntheticMachineOSBuild(ctx context.Context, mos
 			Labels: buildLabels,
 			Finalizers: []string{
 				metav1.FinalizerDeleteDependents,
+				constants.MachineOSBuildDeletionFinalizer,
 			},
 			Annotations:     buildAnnotations,
 			OwnerReferences: []metav1.OwnerReference{*oref},
